@@ -636,6 +636,45 @@ def test_probe_matches_direct_build(machine, live_roster):
     assert script(rs_prog) == script(rs_direct)
 
 
+@pytest.mark.parametrize("gate", ["x180", "x90"])
+def test_gate_target_probes_build_for_both_gates(machine, gate):
+    """Issue #24: the drag-equator probe died with a TypeError (stale ``lock_x90``
+    kwarg into quam_fields.set_drag_beta) before any QUA was emitted, for BOTH
+    target gates — and nothing imported the probe, so no test caught it. Build all
+    three target_gate probes end-to-end on the live state for each gate, and prove
+    the equator's install/restore leaves the stored QUAM alphas unchanged."""
+    from customized import quam_fields
+    from customized.probes import qubit_deterministic_benchmarking as db_probe
+    from customized.probes import qubit_drag_alternating as drag_alternating_probe
+    from customized.probes import qubit_drag_equator as drag_equator_probe
+    from customized.probes._lib import select_qubits
+
+    qubits_names = ["q4", "q5"]
+    qubits = select_qubits(machine, qubits_names, multiplexed=True)
+
+    before = {q: quam_fields.get_drag_beta(machine.qubits[q], operation=gate)
+              for q in qubits_names}
+    prog, axes, config = drag_equator_probe.build_program(
+        machine, qubits, num_shots=10, beta_array=[-0.2, 0.0, 0.2],
+        pulse_repetitions=3, reset_type="thermal",
+        use_state_discrimination=False, target_gate=gate)
+    assert prog is not None and config is not None
+    after = {q: quam_fields.get_drag_beta(machine.qubits[q], operation=gate)
+             for q in qubits_names}
+    assert after == pytest.approx(before)
+
+    prog, _ = drag_alternating_probe.build_program(
+        machine, qubits, num_shots=10, beta_array=[-0.2, 0.0, 0.2],
+        nb_pulses_array=[2, 4], reset_type="thermal",
+        use_state_discrimination=False, target_gate=gate)
+    assert prog is not None
+
+    prog, _ = db_probe.build_program(
+        machine, qubits, num_shots=10, repetitions=[0, 4, 8],
+        target_gate=gate, reset_type="thermal", use_state_discrimination=False)
+    assert prog is not None
+
+
 def test_live_readout_window_round_trip(machine, live_roster):
     """The window accessors against a REAL QUAM ReadoutPulse (its default-weights
     reference semantics are what the stub only mimics) — restored afterwards."""

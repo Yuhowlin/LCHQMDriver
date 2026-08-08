@@ -27,7 +27,8 @@ def build_program(
     alpha_array = np.asarray(beta_array, dtype=float)
     nb_pulses_array = np.asarray(nb_pulses_array)
 
-    op_name = "x90" if target_gate in ("x90", "X90") else "x180"
+    # same normalization as scqo's _gate_target (probes must not import scqo)
+    op_name = "x90" if str(target_gate).strip().lower() == "x90" else "x180"
 
     first_q_name = qubits.get_names()[0]
     first_q = machine.qubits[first_q_name]

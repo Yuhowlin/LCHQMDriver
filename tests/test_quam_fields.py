@@ -115,6 +115,30 @@ def test_set_pi_amp_x90_writes_both_pi_half_storage_nodes():
         assert isinstance(ops[alias], str), f"{alias} alias must stay a reference"
 
 
+def test_set_pi_amp_x90_preserves_a_referenced_neg_x90_amplitude():
+    """The live states carry ``-x90_DragCosine.amplitude`` as a QUAM #-reference
+    to ``x90_DragCosine`` — it already follows the real node. Writing a literal
+    over it would silently SEVER the link (issue #24 latent find), so the family
+    write must skip it, exactly as ``_set_op_alpha`` skips referenced alphas."""
+    class _Op:
+        def __init__(self, amplitude, ref=None):
+            self.amplitude = amplitude
+            self.__quam__ = {"amplitude": ref if ref is not None else amplitude}
+
+    ops = {
+        "x90_DragCosine": _Op(0.10554),
+        "-x90_DragCosine": _Op(0.10554, ref="#../x90_DragCosine/amplitude"),
+        "x90": "#./x90_DragCosine",
+        "-x90": "#./-x90_DragCosine",
+    }
+    q = SimpleNamespace(xy=SimpleNamespace(operations=ops))
+    quam_fields.set_pi_amp(q, 0.2, operation="x90")
+    assert ops["x90_DragCosine"].amplitude == pytest.approx(0.2)
+    # the reference survives; the stub's shadow literal was not overwritten
+    assert ops["-x90_DragCosine"].__quam__["amplitude"] == "#../x90_DragCosine/amplitude"
+    assert ops["-x90_DragCosine"].amplitude == pytest.approx(0.10554)
+
+
 def test_get_pi_amp_reads_the_requested_family():
     q = _chipa_ops()
     assert quam_fields.get_pi_amp(q) == pytest.approx(0.28619)

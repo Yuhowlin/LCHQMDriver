@@ -42,18 +42,19 @@ FIELD_BINDINGS: dict[str, dict[str, VendorBinding]] = {
                     "(quam_fields.set_drive_freq keeps the drive line on the qubit)"),
         "pi_amp": VendorBinding(
             path="q.xy.operations['x180'].amplitude", unit="",
-            convert="a write also sets the pi/2 storage nodes (x90_DragCosine and "
-                    "-x90_DragCosine) to HALF this value",
+            convert="a write covers the x180 family's storage nodes; fields that "
+                    "are QUAM #-references are skipped (they follow the real node)",
             note="written on the x180_DragCosine storage node; the plain x180 "
                  "entry is usually a QUAM reference alias and follows. Writes the "
                  "x180 family ONLY - the pi/2 is its own knob (pi_amp_x90), never "
                  "derived as half of this one"),
         "pi_amp_x90": VendorBinding(
             path="q.xy.operations['x90_DragCosine'].amplitude", unit="",
-            convert="a write also sets -x90_DragCosine, whose AMPLITUDE is its own "
-                    "number (only its alpha/detuning are references - the negative "
-                    "sense comes from axis_angle = pi), so the two pi/2 gates cannot "
-                    "drift apart; y90/-y90 are aliases and follow x90_DragCosine",
+            convert="a write also covers -x90_DragCosine (its negative sense comes "
+                    "from axis_angle = pi, not a negated amplitude): a literal "
+                    "amplitude there is written so the two pi/2 gates cannot drift "
+                    "apart, a #-reference one is skipped (it already follows); "
+                    "y90/-y90 are aliases and follow x90_DragCosine",
             note="written on the x90_DragCosine storage node; calibrated by "
                  "qubit_deterministic_benchmarking with target_gate=x90. Qblox "
                  "DERIVES X90 from rxy.amp180, so it has no independent home there "

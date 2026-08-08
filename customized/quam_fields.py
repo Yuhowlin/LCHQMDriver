@@ -559,11 +559,15 @@ def set_flux_delay(flux_channel: Any, value: float) -> None:
 #: skips string references), but are written anyway for non-DragCosine setups where
 #: they are real pulses.
 #:
-#: ``-x90_DragCosine`` is a SECOND REAL pi/2 node, not an alias: only its ``alpha`` and
-#: ``detuning`` are references to ``x90_DragCosine``. Its AMPLITUDE is its own number,
-#: because the negative sense comes from ``axis_angle = pi`` rather than a negated
-#: amplitude. Writing x90 without it leaves the two pi/2 gates disagreeing with each
-#: other -- chipA q1 ran at x90 = 0.07302 with -x90 = 0.09329 against a correct 0.14310.
+#: ``-x90_DragCosine`` is a SECOND pi/2 node, not a string alias (the negative sense
+#: comes from ``axis_angle = pi`` rather than a negated amplitude). Which of its
+#: fields are references varies by config: the current live states reference its
+#: ``amplitude`` (and ``alpha``/``detuning``) to ``x90_DragCosine``, but it has also
+#: shipped with an independent literal amplitude -- chipA q1 once ran at
+#: x90 = 0.07302 with -x90 = 0.09329 against a correct 0.14310. Hence the write
+#: covers the whole family, and ``_set_op_amp``/``_set_op_alpha`` skip any field
+#: that is a ``#``-reference (it already follows the real node; a literal would
+#: sever it) while writing independent literals so the family cannot disagree.
 _AMP_NODES: dict[str, tuple[str, ...]] = {
     "x180": ("x180_DragCosine", "x180"),
     "x90": ("x90_DragCosine", "x90", "-x90_DragCosine", "-x90"),
@@ -687,14 +691,36 @@ def _set_op_length(ops: Any, name: str, value: int) -> None:
         op.length = int(value)
 
 
+def _field_is_reference(op: Any, field: str) -> bool:
+    """True when ``op.<field>``'s STORED value is a QUAM ``#...`` reference: it
+    follows another node, so a literal write would sever the link — and real
+    QUAM refuses one outright with a ValueError ("set the attribute to None
+    first"). Real QUAM objects expose ``get_raw_value``; the plain test stubs
+    carry a ``__quam__`` dict instead."""
+    try:
+        raw = op.get_raw_value(field)
+    except Exception:
+        try:
+            raw = op.__quam__.get(field) if hasattr(op, "__quam__") else None
+        except Exception:
+            return False
+    return isinstance(raw, str) and raw.startswith("#")
+
+
 def _set_op_amp(ops: Any, name: str, value: float) -> None:
-    """Set ops[name].amplitude, but only when ops[name] is a real pulse object
-    (not a plain QUAM string-reference alias)."""
+    """Set ``ops[name].amplitude``, skipping string-reference aliases AND nodes
+    whose ``amplitude`` is itself a QUAM reference — the ``_set_op_alpha`` rule.
+
+    Forcing a literal over a ``#``-reference would silently SEVER the alias, so
+    later writes to the real node would stop propagating to it (the live states
+    carry ``-x90_DragCosine.amplitude`` as exactly such a reference)."""
     try:
         op = ops[name]
     except (KeyError, TypeError):
         return
     if isinstance(op, str):  # a string-reference entry -> skip (target holds the value)
+        return
+    if _field_is_reference(op, "amplitude"):
         return
     if hasattr(op, "amplitude"):
         op.amplitude = value
@@ -759,7 +785,10 @@ def _set_op_alpha(ops: Any, name: str, value: float) -> None:
 
     Those follow their storage node by design -- ``-x90_DragCosine.alpha`` is exactly
     such a reference. Forcing a literal over one would silently SEVER the alias, so
-    later writes to the real node would stop propagating to it.
+    later writes to the real node would stop propagating to it. The old
+    ``__quam__``-dict check missed references on REAL QUAM objects (which expose
+    them through ``get_raw_value``), so QUAM's own ValueError killed the drag
+    x90 path on the live state — issue #24.
     """
     try:
         op = ops[name]
@@ -767,12 +796,8 @@ def _set_op_alpha(ops: Any, name: str, value: float) -> None:
         return
     if isinstance(op, str):
         return
-    try:
-        raw_alpha = op.__quam__.get("alpha") if hasattr(op, "__quam__") else None
-        if isinstance(raw_alpha, str) and raw_alpha.startswith("#"):
-            return
-    except Exception:
-        pass
+    if _field_is_reference(op, "alpha"):
+        return
     if hasattr(op, "alpha"):
         op.alpha = float(value)
 

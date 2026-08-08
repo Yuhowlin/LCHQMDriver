@@ -27,7 +27,8 @@ def build_program(
 
     alpha_array = np.asarray(beta_array, dtype=float)
 
-    op_name = "x90" if target_gate in ("x90", "X90") else "x180"
+    # same normalization as scqo's _gate_target (probes must not import scqo)
+    op_name = "x90" if str(target_gate).strip().lower() == "x90" else "x180"
 
     ref_alpha = float(np.max(np.abs(alpha_array)))
     if ref_alpha < 1e-6:
@@ -39,7 +40,7 @@ def build_program(
     for q_name in qubits.get_names():
         q_obj = machine.qubits[q_name]
         orig_alphas[q_name] = quam_fields.get_drag_beta(q_obj, operation=op_name)
-        quam_fields.set_drag_beta(q_obj, ref_alpha, operation=op_name, lock_x90=(op_name == "x180"))
+        quam_fields.set_drag_beta(q_obj, ref_alpha, operation=op_name)
 
     sweep_axes = {
         "qubit": xr.DataArray(qubits.get_names()),
@@ -120,7 +121,7 @@ def build_program(
 
     # Restore original QUAM alpha values
     for q_name, orig_alpha in orig_alphas.items():
-        quam_fields.set_drag_beta(machine.qubits[q_name], orig_alpha, operation=op_name, lock_x90=(op_name == "x180"))
+        quam_fields.set_drag_beta(machine.qubits[q_name], orig_alpha, operation=op_name)
 
     return prog, sweep_axes, config
 
