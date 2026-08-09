@@ -792,8 +792,8 @@ def test_gate_target_probes_build_for_both_gates(machine, gate):
     the equator's install/restore leaves the stored QUAM alphas unchanged."""
     from scqo_qm import quam_fields
     from scqo_qm.experiments import qubit_deterministic_benchmarking as db_probe
-    from scqo_qm.probes import qubit_drag_alternating as drag_alternating_probe
-    from scqo_qm.probes import qubit_drag_equator as drag_equator_probe
+    from scqo_qm.experiments import qubit_drag_alternating as drag_alternating_probe
+    from scqo_qm.experiments import qubit_drag_equator as drag_equator_probe
     from scqo_qm.experiments._lib import select_qubits
 
     qubits_names = ["q4", "q5"]
@@ -1041,7 +1041,7 @@ def test_xyz_delay_probe_builds_against_the_baked_config(machine, live_roster,
     config lacks. Pin that the baked ops travel and the program compiles."""
     from qm import generate_qua_script
 
-    from scqo_qm.probes import qubit_xyz_delay as xyz_probe
+    from scqo_qm.experiments import qubit_xyz_delay as xyz_probe
     from scqo_qm.experiments.qubit_xyz_delay import QMQubitXyzDelay
 
     captured = {}
@@ -1122,7 +1122,7 @@ def test_ramsey_cryoscope_probe_builds_against_the_baked_config(machine, live_ro
     COMPILES against the live QUAM (the pure validate_inputs test cannot)."""
     from qm import generate_qua_script
 
-    from scqo_qm.probes import qubit_ramsey_cryoscope as ramsey_cryoscope_probe
+    from scqo_qm.experiments import qubit_ramsey_cryoscope as ramsey_cryoscope_probe
     from scqo_qm.experiments.qubit_ramsey_cryoscope import QMQubitRamseyCryoscope
 
     name = _live_flux_qubit(machine)
