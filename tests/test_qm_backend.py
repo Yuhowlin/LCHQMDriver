@@ -992,7 +992,7 @@ def test_swap_chevron_probe_builds_against_the_baked_config(machine, live_roster
     them. Pin that the config actually travels, and that the program compiles."""
     from qm import generate_qua_script
 
-    from scqo_qm.probes import pair_qq_chevron as chevron_probe
+    from scqo_qm.experiments import pair_swap_chevron as chevron_probe
     from scqo_qm.experiments.pair_swap_chevron import QMPairSwapChevron
 
     captured = {}

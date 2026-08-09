@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from scqo_qm.experiments._flux_limits import dac_rail_v
-from scqo_qm.probes.pair_qq_chevron import _flux_qubit, resolve_amplitudes
+from scqo_qm.experiments.pair_swap_chevron import _flux_qubit, resolve_amplitudes
 
 #: the stubs below expose no opx_output, so they get the conservative rail
 _DAC_RAIL = dac_rail_v(None)
