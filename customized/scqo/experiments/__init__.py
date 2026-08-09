@@ -1,6 +1,8 @@
 """Importing this package registers every QM experiment into the scqo catalog.
 
-Add a line here for each new experiment module so its ``@register`` runs.
+Add a line here for each new experiment module so its ``@register`` runs
+(manual on purpose; ``tests/test_experiment_registration.py`` enforces
+completeness in both directions).
 """
 
 from . import pair_swap_chevron  # noqa: F401  (import side effect: @register)
@@ -39,6 +41,3 @@ from . import resonator_spectroscopy_power_chain  # noqa: F401  (import side eff
 from . import resonator_spectroscopy_power_amp  # noqa: F401  (import side effect: @register)
 from . import single_shot_readout  # noqa: F401  (import side effect: @register)
 from . import single_shot_readout_gef  # noqa: F401  (import side effect: @register)
-
-__all__ = ["qubit_ramsey", "qubit_spectroscopy", "qubit_spectroscopy_overlap",
-           "qubit_power_rabi", "resonator_spectroscopy"]

@@ -23,14 +23,18 @@ This repo is the **QM reference backend** for **`scqo`**, the vendor-neutral pro
 - `calibrations/<name>.py` → copied-in, do NOT edit (overwritten on next sync)
 - `calibration_utils/<name>/` → copied-in, do NOT edit (overwritten on next sync)
 
-**Custom LCH nodes** (this lab's own code):
+**Custom LCH nodes** (this lab's own code — the LEGACY dual-path layout, FROZEN 2026-08-09: a new
+experiment is scqo-only and gets NO qualibrate node unless explicitly requested; see **Adding a
+new experiment** under Probes vs shells):
 - `calibrations/LCH_<name>.py` → calibration script (GUI entry point)
 - `customized/node/LCH_<name>/` → qualibrate-side code for the node: `parameters.py` (GUI schema; required unless the node reuses a vendored `Parameters`), plus the node's `analysis.py` (scqat adapter) and `update.py` (state-update policy) once extracted. See **Probes vs shells** below for what goes where.
 - `customized/probes/<name>.py` → the instrument-acquisition half, shared with scqo. See **Probes vs shells**.
 - `customized/components/` → shared pulse shapes, macros, QUAM extensions
 
 ## Probes vs shells (`customized/probes/` + `customized/node/`)
-LCH nodes are being refactored so qualibrate is a thin shell, not the architecture. The split is by
+LCH nodes are being refactored so qualibrate is a thin shell, not the architecture. The table below
+describes the FROZEN legacy dual-path set (kept for the migration — it is NOT the pattern for new
+work; see **Adding a new experiment** below). The split is by
 **who calls the code**, which is also an **import rule**:
 
 | Folder | Side | May import |
@@ -41,6 +45,25 @@ LCH nodes are being refactored so qualibrate is a thin shell, not the architectu
 
 Shared probe helpers (`select_qubits` — the node-free `get_qubits`; `acquire` — the shared
 execute-and-fetch) live in `customized/probes/_lib.py`.
+
+### Adding a new experiment (scqo-only — the default since 2026-08-09)
+New experiments get NO qualibrate node, no `customized/node/` package and no probe module —
+ONE fused file, exactly LCHQBDriver's shape:
+1. `customized/scqo/experiments/<name>.py`: subclass the backend-free `scqo.experiments.<Name>`,
+   build the QUA program inline in `probe()` (vendor imports stay lazy inside the method), return
+   `(prog, sweep_axes)` — or the self-acquiring 3-tuple `(prog, sweep_axes, module)` (the
+   t1-tracker/tomography pattern) when the streams need a custom `acquire()`.
+2. `@register` the class and add its import line in `customized/scqo/experiments/__init__.py`
+   (manual — `tests/test_experiment_registration.py` refuses a module missing its line).
+3. Shared helpers stay where they are and are imported FROM the fused file:
+   `customized/probes/_lib.py` (`select_qubits`, `acquire`), `_flux_limits`, `_amp_limits`,
+   `customized/scqo/experiments/_reset.py` (`check_reset_method`). Legal import direction:
+   scqo side → probes helpers, never the reverse.
+4. Fused files MAY import qm.qua, quam, qualang_tools, `qualibration_libs.core`/`.data` and scqo;
+   NEVER qualibrate, never scqat.
+5. Census literals that react to a new experiment: `tests/test_preview.py` `SELF_ACQUIRING`
+   (self-acquiring shells), `tests/test_reset_method.py` `CARRIERS` (active-reset opt-in).
+A qualibrate node for a new experiment is legacy-path work, done only on explicit request.
 
 **Virtual-detuning sign — a SILENT failure.** A probe realizing scqo's
 `frequency_detuning_hz` must ramp the phase **negative on EVERY backend**: the second pi/2's
@@ -161,7 +184,9 @@ threshold, and the Bayesian one a missing confusion matrix, BY NAME before any Q
 
 **Migration status:** qualibrate-node migration is in progress; the `customized/` split into a
 standalone QM-backend repo (symmetric with LCHQBDriver) is decided but deferred until migration
-completes — the shells→probes import rule above is the boundary the split will cut along.
+completes — the shells→probes import rule above is the boundary the split will cut along. Since
+2026-08-09 new experiments are scqo-only fused files (**Adding a new experiment** above); the
+existing two-layer probe+adapter set is FROZEN and gets fused at that cutover, not before.
 
 ### State authority during the transition (scqo `state_sync` rule)
 Two writers exist for QUAM today: unmigrated qualibrate nodes (write QUAM directly) and scqo's
@@ -310,3 +335,4 @@ The vendor dependency stack (`qm` QUA control → `quam` hardware abstraction �
 5. **Flag critical dependencies.** When creating or modifying customized code, if any dependency (from `qm`, `quam`, `quam_builder`, `qualibrate`, or other packages) is critical to the implementation, explicitly tell the user which dependencies are involved.
 6. **Check workspace completeness.** If the workspace is missing expected folders (e.g., `qm`, `quam`, `quam_builder`, `qualibrate`), notify the user so they can add them on the current device.
 7. **Report conflicts.** If existing code contradicts these instructions (e.g., an LCH node has unnecessary analysis.py/plotting.py files, or imports don't follow the expected pattern), inform the user before making changes.
+8. **No qualibrate node for new experiments.** New experiments are scqo-only fused files (**Adding a new experiment**); scaffold `calibrations/LCH_*.py` / `customized/node/LCH_*/` only when the user explicitly asks for a qualibrate node.

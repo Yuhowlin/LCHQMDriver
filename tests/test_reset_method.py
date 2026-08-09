@@ -130,16 +130,17 @@ def test_every_qm_reset_shell_resolves_through_the_helper():
 
 
 def test_no_probe_hardcodes_a_reset_literal():
-    """The probe-side half: no probe passes a string literal to ``qubit.reset``
-    — every reset threads the shell-resolved ``reset_type``. Catches the next
-    copy-paste of the old ``qubit.reset("thermal", ...)``."""
+    """The probe-side half: no probe or fused shell passes a string literal to
+    ``qubit.reset`` — every reset threads the shell-resolved ``reset_type``.
+    Catches the next copy-paste of the old ``qubit.reset("thermal", ...)``."""
     pattern = re.compile(r"\.reset\(\s*['\"]")
     offenders = []
-    for path in sorted(PROBES.glob("*.py")):
-        for lineno, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), 1):
-            if pattern.search(line.split("#", 1)[0]):
-                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    for folder in (PROBES, SHELLS):
+        for path in sorted(folder.glob("*.py")):
+            for lineno, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line.split("#", 1)[0]):
+                    offenders.append(f"{folder.name}/{path.name}:{lineno}: {line.strip()}")
     assert not offenders, "\n  ".join(["thread reset_type instead:"] + offenders)
 
 

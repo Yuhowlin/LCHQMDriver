@@ -1,10 +1,13 @@
-"""Instrument probes: the acquisition half of each experiment (params in -> Dataset out).
+"""Instrument probes: the acquisition half of each LEGACY dual-path experiment.
 
-A probe is the only code in this repo shared between the two orchestrators: the
-qualibrate shells in `calibrations/LCH_*.py` call it today, and the scqo
-`QMBackend` (planned) will call exactly the same functions. Everything
-qualibrate-specific (parameter schema, scqat analysis adapter, state-update
-policy) lives in `customized/node/LCH_<name>/` instead.
+FROZEN LAYER (2026-08-09): new experiments do NOT add modules here — they are
+scqo-only fused files in `customized/scqo/experiments/` (CLAUDE.md "Adding a new
+experiment"). A probe here is the code shared between the frozen set's two
+orchestrators: the qualibrate shells in `calibrations/LCH_*.py` and the scqo
+`QMBackend` call exactly the same functions. Everything qualibrate-specific
+(parameter schema, scqat analysis adapter, state-update policy) lives in
+`customized/node/LCH_<name>/` instead. The shared helpers (`_lib`,
+`_flux_limits`, `_amp_limits`) stay importable from fused files.
 
 Import rules for everything under this package:
 - MAY import: qm.qua, quam, qualang_tools, qualibration_libs.core / .data

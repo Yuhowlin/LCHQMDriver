@@ -52,22 +52,24 @@ def test_only_one_module_defines_the_bound():
     DAC-rail constants — same rule, applied to ``amp()``'s bound.
 
     Static (AST) rather than import-based: a copy would be caught even in a probe
-    no test imports.
+    no test imports. Scans `customized/probes/` AND the fused scqo experiments
+    dir, where new experiments live.
     """
     import ast
     import pathlib
 
-    probes = pathlib.Path(__file__).resolve().parents[1] / "customized" / "probes"
+    customized = pathlib.Path(__file__).resolve().parents[1] / "customized"
     offenders = []
-    for path in sorted(probes.glob("*.py")):
-        if path.name == "_amp_limits.py":
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Assign):
+    for folder in (customized / "probes", customized / "scqo" / "experiments"):
+        for path in sorted(folder.glob("*.py")):
+            if path.name == "_amp_limits.py":
                 continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id.lstrip("_") == "MAX_AMP_SCALE":
-                    offenders.append(f"{path.name}:{node.lineno}")
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Assign):
+                    continue
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id.lstrip("_") == "MAX_AMP_SCALE":
+                        offenders.append(f"{path.relative_to(customized)}:{node.lineno}")
     assert offenders == [], (
         "these define their own copy of the QUA amplitude_scale bound; import "
         f"MAX_AMP_SCALE from customized.probes._amp_limits instead: {offenders}"
