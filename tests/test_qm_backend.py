@@ -591,8 +591,8 @@ def test_probe_matches_direct_build(machine, live_roster):
         return "\n".join(ln for ln in generate_qua_script(prog, config).splitlines() if "generated at" not in ln)
 
     from scqo_qm.experiments._lib import select_qubits
-    from scqo_qm.probes import qubit_ramsey as ramsey_probe
-    from scqo_qm.probes import qubit_power_rabi as power_rabi_probe
+    from scqo_qm.experiments import qubit_ramsey as ramsey_probe
+    from scqo_qm.experiments import qubit_power_rabi as power_rabi_probe
     from scqo_qm.experiments import _resonator_spectroscopy as resonator_spec_probe
     from scqo_qm.experiments.qubit_ramsey import QMQubitRamsey
     from scqo_qm.experiments.qubit_power_rabi import QMQubitPowerRabi
@@ -1244,7 +1244,7 @@ def test_active_reset_program_builds_on_live_state(machine, live_roster):
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
-    from scqo_qm.probes import qubit_ramsey as ramsey_probe
+    from scqo_qm.experiments import qubit_ramsey as ramsey_probe
 
     # a live qubit whose xy carries both x90 (ramsey) and x180 (the reset pi)
     name = next((n for n, q in machine.qubits.items()
