@@ -3,7 +3,25 @@
 Add a line here for each new experiment module so its ``@register`` runs
 (manual on purpose; ``tests/test_experiment_registration.py`` enforces
 completeness in both directions).
+
+Fused experiment modules carry their QUA builders at module level, so this
+import pulls in ``qm.qua`` eagerly (the QUA DSL's star-import cannot be
+function-local). qm's import-time logger writes to STDOUT by default, which
+would corrupt the scqo CLI's JSON contract — the block below flips qm's own
+switch and re-homes the same records on stderr before the first qm import.
 """
+
+import logging as _logging
+import os as _os
+import sys as _sys
+
+_os.environ.setdefault("QM_DISABLE_STREAMOUTPUT", "1")
+_qm_logger = _logging.getLogger("qm")
+if not any(getattr(_h, "stream", None) is _sys.stderr for _h in _qm_logger.handlers):
+    _handler = _logging.StreamHandler(_sys.stderr)
+    _handler.setFormatter(_logging.Formatter("%(asctime)s - qm - %(levelname)-8s - %(message)s"))
+    _qm_logger.addHandler(_handler)
+    _qm_logger.setLevel(_logging.INFO)
 
 from . import pair_swap_chevron  # noqa: F401  (import side effect: @register)
 from . import pair_swap_flux_map  # noqa: F401  (import side effect: @register)
