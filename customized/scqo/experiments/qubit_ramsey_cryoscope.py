@@ -32,6 +32,10 @@ from scqo.experiments import QubitRamseyCryoscope
 class QMQubitRamseyCryoscope(QubitRamseyCryoscope):
     """Build, run and fetch the ramsey cryoscope phase-tomography sequence on the QM OPX."""
 
+    # preview opt-out (backend.SELF_ACQUIRING_ATTR): truthy reason = refuse
+    probe_self_acquires = ("it bakes a per-call config for the phase "
+                           "tomography and fetches against it inside probe()")
+
     def probe(self) -> Any:
         from customized.probes import qubit_ramsey_cryoscope as ramsey_cryoscope_probe
         from customized.probes._lib import select_qubits

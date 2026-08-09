@@ -636,6 +636,24 @@ def test_probe_matches_direct_build(machine, live_roster):
     assert script(rs_prog) == script(rs_direct)
 
 
+def test_preview_writes_qua_script(machine, live_roster, tmp_path):
+    """QMBackend.preview: the QUA-script dump renders from the live state with
+    no QOP connection (generate_config walks the tree in memory)."""
+    from customized.scqo.experiments.qubit_ramsey import QMQubitRamsey
+
+    backend = QMBackend(machine, roster=live_roster)
+    exp = QMQubitRamsey(backend, QMQubitRamsey.Parameters(
+        targets=["q4", "q5"], num_averages=200))
+    exp.sweep_axes = exp.define_sweep()  # the Session's job before the hook
+    out_dir = tmp_path / "prev"
+    files = backend.preview(exp, out_dir)
+    assert files == [out_dir / "qua_script.py"]
+    text = files[0].read_text(encoding="utf-8")
+    assert text.startswith("# scqo preview: qubit_ramsey\n# backend: qm\n")
+    assert "# params:" in text
+    assert len(text.splitlines()) > 20  # a real program body, not just header
+
+
 @pytest.mark.parametrize("gate", ["x180", "x90"])
 def test_gate_target_probes_build_for_both_gates(machine, gate):
     """Issue #24: the drag-equator probe died with a TypeError (stale ``lock_x90``

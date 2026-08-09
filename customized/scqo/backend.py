@@ -52,8 +52,19 @@ from customized.scqo.fieldmap import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from scqo.experiment import Experiment
     from scqo.roster import Roster
+
+#: A shell whose probe() EXECUTES on the instrument and returns a ready
+#: Dataset (instead of a (program, axes[, module]) build) sets this class
+#: attribute to a one-line WHY — the truthy value is the flag, the text is
+#: the refusal reason. getattr default None = the probe builds a standalone
+#: program and preview can render it (default-ALLOW: the majority build;
+#: contrast ACTIVE_RESET_ATTR's default-DENY). Census in tests/test_preview.py
+#: keeps the declarations exactly in step with the shells that really acquire.
+SELF_ACQUIRING_ATTR = "probe_self_acquires"
 
 #: MW-FEM full-scale grid (dBm): -11..+16 in 3 dB steps (power_tools validates the
 #: same values; its docstring's "[-41,10]" range is stale).
@@ -1037,6 +1048,50 @@ class QMBackend(Backend):
                 and "population" in accepted):
             raw = raw.rename({"state": "population"})
         return self._to_canonical(raw, experiment)
+
+    def preview(self, experiment: "Experiment", out_dir: "Path") -> "list[Path]":
+        """Dump the QUA script to ``out_dir`` — fully offline, nothing saved.
+
+        The scqo ``Backend.preview`` hook (``Session.preview`` /
+        ``scqo run <name> --preview``): the same build slice as ``acquire()``
+        minus the instrument — the reset backstop and the thermalization
+        bracket around ``probe()`` (the wait is baked at build time) — then
+        ``generate_qua_script(prog, machine.generate_config())``, which opens
+        no socket (``generate_config`` walks the QUAM tree in memory). Shells
+        whose probe() itself ACQUIRES (declared via ``probe_self_acquires``,
+        see :data:`SELF_ACQUIRING_ATTR`) are refused by name BEFORE probe()
+        can touch the instrument.
+        """
+        from customized.scqo.experiments._reset import check_reset_method
+
+        name = getattr(type(experiment), "name", type(experiment).__name__)
+        reason = getattr(type(experiment), SELF_ACQUIRING_ATTR, None)
+        if reason:
+            raise ValueError(
+                f"{name} cannot be previewed on the QM backend: {reason} — "
+                f"its QUA program only exists inside a real run; run it for "
+                f"real or preview a different experiment")
+        check_reset_method(experiment)  # same backstop as acquire()
+        with self._thermalization_override(experiment):
+            res = experiment.probe()
+        if isinstance(res, xr.Dataset):  # the census missed one — refuse loud
+            raise ValueError(
+                f"{name}.probe() returned a ready Dataset — it acquires "
+                f"during probe(); declare {SELF_ACQUIRING_ATTR} on the shell")
+        prog = res[0]  # covers both the 2-tuple and 3-tuple probe shapes
+        from datetime import datetime, timezone
+
+        from qm import generate_qua_script
+
+        script = generate_qua_script(prog, self._machine.generate_config())
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "qua_script.py"
+        header = (f"# scqo preview: {name}\n"
+                  f"# backend: qm\n"
+                  f"# generated: {datetime.now(timezone.utc).isoformat()}\n"
+                  f"# params: {experiment.params.model_dump_json()}\n\n")
+        path.write_text(header + script, encoding="utf-8")
+        return [path]
 
     @staticmethod
     def _to_canonical(raw: xr.Dataset, experiment: "Experiment") -> xr.Dataset:

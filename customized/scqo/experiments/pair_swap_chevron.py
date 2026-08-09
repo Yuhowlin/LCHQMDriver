@@ -31,6 +31,10 @@ from ._pair_roles import JointPopulationMixin
 class QMPairSwapChevron(JointPopulationMixin, PairSwapChevron):
     """Build, run and fetch the multiplexed swap chevron on the QM OPX."""
 
+    # preview opt-out (backend.SELF_ACQUIRING_ATTR): truthy reason = refuse
+    probe_self_acquires = ("it bakes a per-call config for the sub-17 ns "
+                           "branch and fetches against it inside probe()")
+
     def probe(self) -> Any:
         from ._reset import check_reset_method
         from ._vendor import role_side, vendor_pair_name

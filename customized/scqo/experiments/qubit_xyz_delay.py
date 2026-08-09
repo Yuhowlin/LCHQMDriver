@@ -25,6 +25,10 @@ from scqo.experiments import QubitXyzDelay
 class QMQubitXyzDelay(QubitXyzDelay):
     """Build, run and fetch the multiplexed XY-Z delay scan on the QM OPX."""
 
+    # preview opt-out (backend.SELF_ACQUIRING_ATTR): truthy reason = refuse
+    probe_self_acquires = ("it bakes a per-call config for the slid pulses "
+                           "and fetches against it inside probe()")
+
     def probe(self) -> Any:
         from ._reset import check_reset_method
         from customized.quam_fields import GOVERNED_FLUX_POINT

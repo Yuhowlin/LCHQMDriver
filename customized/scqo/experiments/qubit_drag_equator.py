@@ -15,6 +15,10 @@ from scqo.experiments import QubitDragEquator
 class QMQubitDragEquator(QubitDragEquator):
     """Build a multiplexed DRAG equator QUA program on the QM OPX."""
 
+    # preview opt-out (backend.SELF_ACQUIRING_ATTR): truthy reason = refuse
+    probe_self_acquires = ("it generates a reference-alpha config and "
+                           "fetches against it inside probe()")
+
     def probe(self) -> Any:
         from ._reset import check_reset_method
         from customized.probes._lib import select_qubits

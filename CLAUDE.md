@@ -246,10 +246,14 @@ root).
   is refused, not ignored. Offline proves the policy and that the QUA program builds; the feedback loop
   is hardware, and the chipA walkthrough that closes that gap is the REMAINING step (the QUA path has
   mileage through the `LCH_graph_*` qualibrate scripts, but the scqo shells need their own validation).
-- **Placement rule** (`scqo state --rule`; SCQO TUTORIAL §9): QUAM-tree copies of physics that the
-  tree operationally CONSUMES (T1 for thermalization waits, anharmonicity for DRAG) are CACHES with
-  scqo's physical.json as truth; QUAM's stored measured artifacts (confusion_matrix, gate_fidelity,
-  resonator f_01/frequency_bare) are dead to SCQO — never read, never written by it.
+- **Sequence preview** (`scqo run <name> --preview` → `QMBackend.preview`): dumps
+  `generate_qua_script(prog, machine.generate_config())` to `qua_script.py` — fully OFFLINE
+  (generate_config opens no socket). Six shells acquire INSIDE `probe()` and are refused by
+  name BEFORE it runs, each declaring `probe_self_acquires = "<why>"` (backend constant
+  `SELF_ACQUIRING_ATTR`; default-ALLOW polarity — contrast `supports_active_reset`'s
+  default-DENY): pair_swap_chevron, qc_n_swap_amp, qubit_drag_equator, qubit_drag_alternating,
+  qubit_ramsey_cryoscope, qubit_xyz_delay. Any NEW self-acquiring shell must declare it —
+  `tests/test_preview.py`'s census enforces the set both directions.
 
 ## Tests
 
@@ -282,6 +286,7 @@ so they are instant — loop on those while iterating, and take the full suite b
 | `test_flux_headroom_guard.py` | the whole-tree audit + the clipping-vs-reach severity split | no |
 | `test_reset_method.py` | the active-reset door: the opt-in census (4 carriers), the refusals (opt-in, thermalization override, uncalibrated discriminator/depletion), the `acquire()` backstop | no |
 | `test_qc_populations.py` | shared swap-reset population helpers | no |
+| `test_preview.py` | the `probe_self_acquires` census (exactly the six, both directions) + preview's refusal fires BEFORE `probe()` on the stub | no |
 | `test_power_rabi_update.py`, `test_ramsey_update.py`, `test_readout_frequency_update.py` | the pure `update()` decisions of the matching `LCH_*` node | no |
 | `test_experiment_surface.py` | `customized/scqo/experiments/_vendor.py` — the probes' one door out of the neutral surface | yes |
 | `test_qm_backend.py` | entity surface on the stub; probe equivalence, absolute-power chain + active-reset program build on the LIVE quam_state | yes |

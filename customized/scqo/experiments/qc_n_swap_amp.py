@@ -49,6 +49,10 @@ def _member_states(state: xr.DataArray, high_side: str) -> xr.DataArray:
 class QMQcNSwapAmp(QcNSwapAmp):
     """Build, run and fetch the N-swap amplitude map on the QM OPX."""
 
+    # preview opt-out (backend.SELF_ACQUIRING_ATTR): truthy reason = refuse
+    probe_self_acquires = ("it executes one program per swap pair in a "
+                           "Python loop inside probe()")
+
     def probe(self) -> Any:
         from ._reset import check_reset_method
         from ._vendor import role_side, vendor_pair
