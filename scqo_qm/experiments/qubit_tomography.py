@@ -241,10 +241,7 @@ def acquire(
     log: Optional[Callable] = None,
     config: Optional[dict] = None,
 ) -> xr.Dataset:
-    from qualang_tools.multi_user import qm_session
-
-    qmm = machine.connect()
-    config = config if config is not None else machine.generate_config()
+    from scqo_qm.experiments._lib import qm_job, wait_all_streams
 
     qubit_names = list(sweep_axes["qubit"].values)
     num_qubits = len(qubit_names)
@@ -255,10 +252,9 @@ def acquire(
     prepared_states = list(sweep_axes["prepared_state"].values)
     train_shot_idx = list(sweep_axes["train_shot_idx"].values)
 
-    with qm_session(qmm, config, timeout=timeout) as qm:
-        job = qm.execute(prog)
+    with qm_job(machine, prog, timeout=timeout, config=config) as job:
         results = job.result_handles
-        results.wait_for_all_values()
+        wait_all_streams(machine, results)
 
         I_train_list = []
         Q_train_list = []

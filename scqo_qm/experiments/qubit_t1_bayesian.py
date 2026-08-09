@@ -337,10 +337,7 @@ def acquire(
     (block_idx, probe_idx); last-block posterior evolution; timestamps ->
     elapsed block_time_s). ``lin_wait_cycles``/``interleaved`` are read back
     from the sweep_axes side-channel entries the shell attached."""
-    from qualang_tools.multi_user import qm_session
-
-    qmm = machine.connect()
-    config = config if config is not None else machine.generate_config()
+    from scqo_qm.experiments._lib import qm_job, wait_all_streams
 
     qubit_names = list(np.atleast_1d(sweep_axes["qubit"].values))
     num_qubits = len(qubit_names)
@@ -348,10 +345,9 @@ def acquire(
     lin_wait_cycles = sweep_axes.get("lin_wait_cycles")
     interleaved = lin_wait_cycles is not None
 
-    with qm_session(qmm, config, timeout=timeout) as qm:
-        job = qm.execute(prog)
+    with qm_job(machine, prog, timeout=timeout, config=config) as job:
         results = job.result_handles
-        results.wait_for_all_values()
+        wait_all_streams(machine, results)
 
         t1_s, u_final, u_evol, t1_evol = [], [], [], []
         states, taus, states_lin, stamps = [], [], [], []

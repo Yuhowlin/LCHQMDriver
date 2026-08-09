@@ -42,6 +42,9 @@ scqo_qm/
                          #   are heterogeneous), and the registered QM<Name>(<Name>) class whose
                          #   probe() maps self.params -> the local builder
     _lib.py              # select_qubits/select_qubit_pairs + the shared execute-and-fetch acquire
+                         #   + qm_job, THE session door (multi-user open, halt-on-every-exit,
+                         #   no-progress watchdog, wedge-named errors) — qualang_tools.multi_user
+                         #   is banned package-wide (tests/test_acquire_guard.py census)
     _flux_limits.py      # the flux rail per PORT, two frames (absolute/relative), idle sums
     _amp_limits.py       # the QUA amplitude_scale bound (one home; AST-scan enforced)
     _reset.py            # the active-reset door: check_reset_method/reset_max_attempts
@@ -144,8 +147,9 @@ SILENT failure if broken: (1) `active_reset_rounds` → QUAM `max_attempts` is a
 (2) BOTH `readout_threshold` AND `readout_rus_threshold` are required even at rounds=1, and an
 uncalibrated value is `None` — the guard refuses first; (3) `readout_depletion_s` must be governed
 (QUAM's 16 ns factory default is refused); (4) `thermalization_time_ns` + `active` is refused, not
-ignored. Offline proves policy + program build; the feedback loop is hardware (chipA walkthrough
-still owed).
+ignored. The feedback loop is HARDWARE-VALIDATED (chipA 2026-07/08 + 5Q4C q1 2026-08-09; evidence
++ the degraded-cluster stall trap that mimics an active-reset bug are documented in `_reset.py` /
+`_lib.py`).
 
 **Sequence preview** (`scqo run <name> --preview` → `QMBackend.preview`): dumps
 `generate_qua_script` to `qua_script.py` (offline), then AUTO-TRIES the gateway simulator →
