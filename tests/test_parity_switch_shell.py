@@ -30,7 +30,7 @@ import pytest
 
 from scqo_qm.experiments.qubit_parity_switch_continuous import _cycles
 
-_PROBES_DIR = Path(__file__).resolve().parents[1] / "scqo_qm" / "probes"
+_PROBES_DIR = Path(__file__).resolve().parents[1] / "scqo_qm" / "experiments"
 PROBE_CONTINUOUS = _PROBES_DIR / "qubit_parity_switch_continuous.py"
 PROBE_DISCRETE = _PROBES_DIR / "qubit_parity_switch_discrete.py"
 

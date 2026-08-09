@@ -791,7 +791,7 @@ def test_gate_target_probes_build_for_both_gates(machine, gate):
     three target_gate probes end-to-end on the live state for each gate, and prove
     the equator's install/restore leaves the stored QUAM alphas unchanged."""
     from scqo_qm import quam_fields
-    from scqo_qm.probes import qubit_deterministic_benchmarking as db_probe
+    from scqo_qm.experiments import qubit_deterministic_benchmarking as db_probe
     from scqo_qm.probes import qubit_drag_alternating as drag_alternating_probe
     from scqo_qm.probes import qubit_drag_equator as drag_equator_probe
     from scqo_qm.experiments._lib import select_qubits
