@@ -11,7 +11,7 @@ QM qubit echo (Hahn) for scqo - supplies only ``probe()``.
 
 Parameters, exponential-envelope fit and reporting are inherited from
 ``scqo.experiments.QubitEcho``. scqo sweeps ``wait_time_ns`` (the TOTAL echo idle
-time tau); the LCHQM probe sweeps the per-arm wait in clock cycles (two arms of
+time tau); the QM builder sweeps the per-arm wait in clock cycles (two arms of
 tau/2, 4 ns per cycle -> cycles = tau_ns / 8) and builds the same sweep on coord
 ``idle_time``, which the backend's ``_to_canonical`` renames back.
 """

@@ -1,9 +1,9 @@
-"""QM backend: maps the scqo abstractions onto the QUAM device + the LCHQM probes.
+"""QM backend: maps the scqo abstractions onto the QUAM device + the fused experiment builders.
 
 The QM stack (qm/quam) and the probe helpers are imported lazily (inside methods)
 so that `import scqo_qm.backend.qm_backend` works without an instrument and pulls in
 qualang_tools only when data is actually acquired. This module is never imported by
-the qualibrate calibration nodes - it is the optional scqo integration.
+the qualibrate calibration nodes - scqo is its consumer.
 
 Since the greenfield model a driver serves a view PER CHANNEL ENTITY, not per
 qubit: the roster's ``q1_xy`` / ``q1_ro`` / ``q1_z`` each carry their own
@@ -824,7 +824,7 @@ def _progress_shot_total(experiment: "Experiment") -> int:
 
 
 class QMBackend(Backend):
-    """scqo Backend over a Quantum Machines OPX (via QUAM + the LCHQM probes)."""
+    """scqo Backend over a Quantum Machines OPX (via QUAM + the fused experiment builders)."""
 
     def __init__(self, machine: Any, *, roster: "Roster",
                  timeout: float = 120) -> None:

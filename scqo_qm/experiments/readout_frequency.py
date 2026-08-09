@@ -10,7 +10,7 @@ Parameters, the per-frequency two-Gaussian-mixture fit and the ``readout_freq_hz
 writeback are inherited from ``scqo.experiments.ReadoutFrequency``. PER-SHOT
 contract: every readout shot's I/Q point is recorded individually — the probe's
 streams are ``buffer(2).buffer(len(dfs)).buffer(num_shots)`` with NO
-``.average()``. scqo sweeps ``detuning_hz``; the LCHQM probe applies each value
+``.average()``. scqo sweeps ``detuning_hz``; the QM builder applies each value
 relative to the resonator's current IF (``df + intermediate_frequency`` — same
 convention as the resonator_spectroscopy wrapper) but names its axis
 ``frequency``, which we re-key below.

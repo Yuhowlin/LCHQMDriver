@@ -584,7 +584,7 @@ def live_roster(machine):
 
 def test_probe_matches_direct_build(machine, live_roster):
     """QMQubitRamsey/QMQubitPowerRabi.probe() must produce the same QUA program as calling the
-    LCHQM build_program directly with the mapped kwargs (proves the param mapping)."""
+    module-level build_program directly with the mapped kwargs (proves the param mapping)."""
     from qm import generate_qua_script
 
     def script(prog):  # drop the volatile "generated at <timestamp>" header line

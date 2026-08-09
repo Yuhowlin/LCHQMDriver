@@ -9,7 +9,7 @@ QM resonator spectroscopy vs flux for scqo - supplies only ``probe()``.
 
 Parameters, the dispersive-model fit and reporting are inherited from
 ``scqo.experiments.ResonatorSpectroscopyFlux``. scqo sweeps ``(flux_bias_v,
-detuning_hz)``; the LCHQM probe sweeps ``dcs`` (flux, V) and ``dfs`` (readout
+detuning_hz)``; the QM builder sweeps ``dcs`` (flux, V) and ``dfs`` (readout
 detuning, Hz, relative to each resonator's current IF — same convention as the
 resonator_spectroscopy wrapper) with each qubit fluxing its OWN z line
 (z_source=None, as in the official 02c node).

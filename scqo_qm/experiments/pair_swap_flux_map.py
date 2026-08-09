@@ -10,7 +10,7 @@ swept**, forming the x/y axes of a 2D color map:
     control or target).
 
 Both flux pulses play simultaneously over the same fixed window (the dual-flux pattern
-from `calibrations/LCH_iswap_fixed_time_search.py`). One qubit of the pair is excited
+from the archived `calibrations/exclude/LCH_iswap_fixed_time_search.py`). One qubit of the pair is excited
 with `x180` (selected by `drive_role`, default the control qubit); both qubits are read
 out. There is no fit/state-writeback downstream; the node renders a 2D color map.
 
@@ -35,7 +35,7 @@ QM fixed-time coupler-flux x qubit-flux swap map for scqo — supplies ``probe()
 Parameters, the record-only map summary and the (absent) writeback are inherited
 from ``scqo.experiments.PairSwapFluxMap``; the joint-population reduction comes
 from :class:`JointPopulationMixin`. scqo sweeps ``(qubit_flux_v,
-coupler_flux_v)`` in absolute volts — which is exactly the LCHQM probe's own
+coupler_flux_v)`` in absolute volts — which is exactly this builder's own
 ``amp_mode="absolute"``, so the adapter's work is the role mapping, the neutral
 pulse SHAPE -> QUAM operation name, and quantizing the fixed duration onto the
 4 ns clock.

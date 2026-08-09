@@ -30,7 +30,7 @@ QM ramsey cryoscope for scqo — supplies only ``probe()``.
 
 Parameters, the step-response estimator and the paired-fact writeback are
 inherited from ``scqo.experiments.QubitRamseyCryoscope``. scqo sweeps the flux-pulse
-DURATION (``duration_ns``, every ns) x the closing-pulse FRAME (turns); the LCHQM
+DURATION (``duration_ns``, every ns) x the closing-pulse FRAME (turns); the QM
 probe realizes the 1 ns duration resolution with baking (<=16 ns baked, a
 stretched ``const`` plus a baked remainder above) and plays the flux pulse
 idle-relative at the governed flux point.

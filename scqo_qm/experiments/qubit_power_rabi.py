@@ -9,7 +9,7 @@ QM qubit power Rabi for scqo - supplies only ``probe()``.
 
 Parameters, the cosine fit, opt_amp_prefactor extraction and the pi_amp writeback are
 inherited from ``scqo.experiments.QubitPowerRabi``. scqo's ``amp_prefactor`` is already
-a factor of the current pi pulse, which is exactly the LCHQM probe's
+a factor of the current pi pulse, which is exactly the QM builder's
 ``amplitude_scale``, so the sweep passes straight through — and since the probe emits
 that same axis NAME, ``_to_canonical`` matches it by name instead of by position.
 """

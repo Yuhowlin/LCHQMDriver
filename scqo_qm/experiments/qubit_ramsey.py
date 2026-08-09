@@ -7,7 +7,7 @@ QM Ramsey for scqo - supplies only ``probe()``.
 
 Parameters, the decaying-cosine fit, T2*/detuning extraction and the drive_freq_hz
 writeback are all inherited from ``scqo.experiments.QubitRamsey``. This class only
-compiles the scqo sweep into a QUA program via the shared LCHQM Ramsey probe.
+compiles the scqo sweep into a QUA program via the Ramsey builder below.
 """
 
 from __future__ import annotations

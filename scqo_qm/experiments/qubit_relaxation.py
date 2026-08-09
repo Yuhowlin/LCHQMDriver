@@ -6,7 +6,7 @@ Excite with x180, wait a swept delay, measure. Sequence mirrors the vendored off
 QM qubit relaxation (T1) for scqo - supplies only ``probe()``.
 
 Parameters, exponential fit and reporting are inherited from
-``scqo.experiments.QubitRelaxation``. scqo sweeps ``wait_time_ns``; the LCHQM probe
+``scqo.experiments.QubitRelaxation``. scqo sweeps ``wait_time_ns``; the QM builder
 builds the same sweep on coord ``idle_time``, which the backend's ``_to_canonical``
 renames back.
 """

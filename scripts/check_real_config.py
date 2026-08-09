@@ -9,7 +9,7 @@ fit -> write results back -> save (to an explicit scratch path ONLY — the live
 quam_state is never targeted) -> reload and compare. Everything happens on a
 temporary copy; your original files are never opened for writing.
 
-Needs the QM environment (lab: ``conda activate LCHQM_test``).
+Needs the QM environment (lab: ``D:\github\.venv-qm``).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def main() -> int:
         raise SystemExit(
             f"missing package: {err.name}\n"
             "This self-test needs the QM stack (quam/qm + this repo installed). "
-            "Run it in the lab's QM environment:  conda activate LCHQM_test"
+            "Run it in the lab's QM environment: D:\github\.venv-qm"
         )
 
     machine = Quam.load(str(work))

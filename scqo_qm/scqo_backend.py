@@ -31,11 +31,11 @@ def build_backend(cfg: LabConfig, setup: dict, roster: "Roster") -> Backend:
         raise SystemExit(f"the qm driver serves backend 'qm', got {setup.get('backend')!r}")
     # State-authority rule checked BEFORE loading QUAM: fail before any state file
     # is touched. Forbidden while qualibrate nodes still write QUAM directly (see
-    # LCHQMDriver CLAUDE.md); the migration finish line is flipping this to "push".
+    # scqo-qm CLAUDE.md); the migration finish line is flipping this to "push".
     if cfg.state_sync != "pull":
         raise SystemExit(
             'lab config sets state_sync != "pull" for the QM backend: forbidden while '
-            "qualibrate nodes still write QUAM directly (see LCHQMDriver CLAUDE.md)"
+            "official qualibrate nodes can still write QUAM (see scqo-qm CLAUDE.md)"
         )
     folder = Path(setup["instrument_config"])
     missing = [n for n in ("state.json", "wiring.json") if not (folder / n).is_file()]

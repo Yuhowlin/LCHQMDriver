@@ -11,7 +11,7 @@ Parameters, the per-bias echo-fringe fit and the writeback (the decouple point
 as ``idle_flux`` on the COUPLER MODE's own flux channel, plus the residual
 ``zz_hz`` fact on the pair) are inherited from
 ``scqo.experiments.PairZZCoupler``. scqo sweeps
-``(coupler_bias_v, idle_time_ns)``; the LCHQM probe sweeps ``amplitudes`` (V on
+``(coupler_bias_v, idle_time_ns)``; the QM builder sweeps ``amplitudes`` (V on
 the pair's tunable coupler) x ``durations`` (interaction time, clock cycles) with
 a Hahn echo + virtual detuning on ONE pair member and joint two-qubit state
 readout. The neutral ``measure`` role (high/low, roster-declared) is mapped onto

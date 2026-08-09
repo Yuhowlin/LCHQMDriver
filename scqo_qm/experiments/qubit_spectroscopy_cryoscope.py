@@ -37,7 +37,7 @@ QM long-time (spectroscopy) cryoscope for scqo — supplies only ``probe()``.
 Parameters, the spectroscopy-cryoscope estimator and the paired-fact writeback
 are inherited from ``scqo.experiments.QubitSpectroscopyCryoscope``. scqo sweeps
 the drive DETUNING (``detuning_hz``) x the (log-spaced) WAIT time
-(``wait_time_ns``) into a parked flux pulse; the LCHQM probe realizes it with a
+(``wait_time_ns``) into a parked flux pulse; the QM builder realizes it with a
 held ``const`` flux, a wait, and a fixed ``x180`` spectroscopy pulse.
 
 Unlike the Ramsey cryoscope, there is NO baking — a plain stretched ``const`` plus

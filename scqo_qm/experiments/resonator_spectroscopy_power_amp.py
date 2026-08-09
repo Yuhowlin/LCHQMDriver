@@ -24,7 +24,7 @@ only ``probe()``.
 
 Parameters, the punchout analysis and the readout_power_dbm/readout_freq_hz writeback
 are inherited from ``scqo.experiments.ResonatorSpectroscopyPowerAmp``. scqo sweeps
-``(power_dbm, detuning_hz)``; the LCHQM probe builds the same sweep on coords
+``(power_dbm, detuning_hz)``; the QM builder builds the same sweep on coords
 ``(power, detuning)``, which the backend's ``_to_canonical`` renames positionally.
 
 Power convention: the core ``run()`` already solved the chain for the window top

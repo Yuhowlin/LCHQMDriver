@@ -6,7 +6,7 @@ reading out the resonator; the qubit line is fitted downstream.
 QM qubit spectroscopy for scqo - supplies only ``probe()``.
 
 Parameters, peak fitting and the drive_freq_hz writeback are inherited from
-``scqo.experiments.QubitSpectroscopy``. scqo sweeps ``detuning_hz``; the LCHQM probe
+``scqo.experiments.QubitSpectroscopy``. scqo sweeps ``detuning_hz``; the QM builder
 builds the same sweep on coord ``detuning``, which the backend's ``_to_canonical``
 renames back.
 

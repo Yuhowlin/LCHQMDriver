@@ -2,7 +2,7 @@
 
 Parameters, the Lorentzian-dip fit and the readout_freq_hz writeback are inherited
 from ``scqo.experiments.ResonatorSpectroscopy``. scqo sweeps ``detuning_hz``;
-the LCHQM probe builds the same sweep on coord ``detuning``, which the backend's
+the QM builder builds the same sweep on coord ``detuning``, which the backend's
 ``_to_canonical`` renames to ``detuning_hz``.
 """
 

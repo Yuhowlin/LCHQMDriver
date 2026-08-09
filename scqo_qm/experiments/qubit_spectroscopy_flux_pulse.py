@@ -15,7 +15,7 @@ QM qubit spectroscopy vs PULSED flux for scqo - supplies only ``probe()``.
 
 Parameters, the transmon-arch fit and reporting are inherited from
 ``scqo.experiments.QubitSpectroscopyFluxPulse``. scqo sweeps ``(flux_bias_v,
-detuning_hz)``; the LCHQM probe sweeps ``dcs`` (flux, V) and ``dfs`` (drive
+detuning_hz)``; the QM builder sweeps ``dcs`` (flux, V) and ``dfs`` (drive
 detuning, Hz) with each qubit fluxing/driving its OWN lines (z/xy source = None,
 as in the official 03b node).
 

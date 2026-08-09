@@ -33,7 +33,7 @@ Parameters, the record-only map summary and the (absent) writeback are
 inherited from ``scqo.experiments.PairSwapChevron``; the joint-population
 reduction comes from :class:`JointPopulationMixin`. scqo sweeps
 ``(flux_amp_v, swap_time_ns)`` in absolute volts and whole nanoseconds; the
-LCHQM probe sweeps a QUA amplitude scale x a 1 ns-granular pulse duration
+QM builder sweeps a QUA amplitude scale x a 1 ns-granular pulse duration
 (baked below 4 ns), so this adapter drives the probe in its ``amp_mode
 ="absolute"`` mode and maps the neutral high/low roles onto the vendor's
 control/target.
