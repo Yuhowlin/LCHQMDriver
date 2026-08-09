@@ -188,8 +188,14 @@ def build_program(
                             qubit.align()
 
                             # Coarse pre-wait (clock cycles) covering the leading
-                            # padding before the fine baked scan.
-                            qubit.wait(half // 4)
+                            # padding before the fine baked scan. FLOORED at 4:
+                            # QUA's wait minimum is 4 cycles and half_scan_ns < 16
+                            # would emit wait(<4) — legal to the qm client and to
+                            # generate_qua_script, refused ONLY by the gateway
+                            # compiler (5Q4C 2026-08-09). The floor is timing-safe:
+                            # this wait only positions the segment start; the XY-Z
+                            # RELATIVE axis rides inside the baked segments.
+                            qubit.wait(max(4, half // 4))
                             with switch_(segment):
                                 for j in range(number_of_segments):
                                     with case_(j):

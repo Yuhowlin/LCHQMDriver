@@ -1033,6 +1033,44 @@ def test_xyz_delay_probe_builds_against_the_baked_config(machine, live_roster,
     assert generate_qua_script(captured["prog"], captured["config"])
 
 
+def test_xyz_delay_small_half_scan_emits_no_illegal_wait(machine, live_roster,
+                                                         monkeypatch):
+    """half_scan_ns < 16 used to bake the coarse pre-wait as wait(<4) — legal to
+    the qm client AND to generate_qua_script, refused ONLY by the gateway
+    compiler ("must be a minimum 4", 5Q4C 2026-08-09). The fix floors the
+    pre-wait at 4 cycles, so the offline pin is the gateway's own rule applied
+    to the generated script: every wait duration >= 4."""
+    import re
+
+    from qm import generate_qua_script
+
+    from scqo_qm.experiments import qubit_xyz_delay as xyz_probe
+    from scqo_qm.experiments.qubit_xyz_delay import QMQubitXyzDelay
+
+    captured = {}
+
+    def fake_acquire(m, prog, sweep_axes, *, num_shots, timeout, log=None, config=None):
+        captured.update(prog=prog, config=config)
+        return xr.Dataset()
+
+    monkeypatch.setattr(xyz_probe, "acquire", fake_acquire)
+
+    backend = QMBackend(machine, roster=live_roster)
+    exp = QMQubitXyzDelay(
+        backend,
+        QMQubitXyzDelay.Parameters(
+            targets=["q4"], half_scan_ns=5, z_pulse_amp_v=0.0, num_averages=2
+        ),
+    )
+    exp.sweep_axes = exp.define_sweep()
+    exp.probe()
+
+    script = generate_qua_script(captured["prog"], captured["config"])
+    waits = [int(m) for m in re.findall(r"\bwait\((\d+)[,)]", script)]
+    assert waits, "expected wait statements in the generated script"
+    assert min(waits) >= 4, f"illegal sub-4-cycle wait reached the script: {sorted(set(waits))[:5]}"
+
+
 def test_swap_flux_map_probe_builds(machine, live_roster):
     """The 2D map needs no baking, so it returns the ordinary (program, axes)
     pair and the backend's shared fetch runs it."""
