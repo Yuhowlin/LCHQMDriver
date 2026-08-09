@@ -39,7 +39,7 @@ import shutil
 import sys
 
 _BASE = "quam_builder.architecture.superconducting.qubit"
-_NEW = ("customized.quam_builder.architecture.superconducting.qubit"
+_NEW = ("scqo_qm.quam_builder.architecture.superconducting.qubit"
         ".thermalizing_transmon")
 
 #: stock QUAM transmon -> the storing subclass that replaces it

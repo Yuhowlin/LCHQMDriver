@@ -28,7 +28,7 @@ ClassVar is build-time and type-hint only, and on a mixed chip there is no singl
 right answer to bind it to.
 """
 
-from customized.quam_builder.architecture.superconducting.qpu.mixed_quam import (
+from scqo_qm.quam_builder.architecture.superconducting.qpu.mixed_quam import (
     MixedTransmonQuam,
 )
 

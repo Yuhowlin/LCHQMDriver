@@ -90,7 +90,7 @@ def test_field_catalog_matches_implementation():
 
     from scqo.catalog import ALL_STATIC_FIELDS, CHANNELS
 
-    from customized.scqo import fieldmap
+    from scqo_qm.backend import fieldmap
 
     assert set(fieldmap.FIELD_BINDINGS) == SERVED_KINDS
     assert set(fieldmap.UNREALIZED) <= SERVED_KINDS
@@ -134,7 +134,7 @@ def test_field_catalog_matches_implementation():
 
     # the backend class serves exactly the declared catalog (methods are pure),
     # and it serves a view class for exactly the kinds the catalog declares
-    from customized.scqo.backend import _CHANNEL_VIEWS, QMBackend
+    from scqo_qm.backend.qm_backend import _CHANNEL_VIEWS, QMBackend
 
     assert QMBackend.field_bindings(None) == fieldmap.FIELD_BINDINGS
     assert QMBackend.unrealized(None) == fieldmap.UNREALIZED
@@ -150,8 +150,8 @@ def test_composite_knob_catalog_covers_every_op_knob():
     alarm, one level down."""
     from scqo.catalog import OP_KNOBS
 
-    from customized.scqo import fieldmap
-    from customized.scqo.backend import QMBackend
+    from scqo_qm.backend import fieldmap
+    from scqo_qm.backend.qm_backend import QMBackend
 
     bound = set(fieldmap.OP_KNOB_BINDINGS)
     declined = set(fieldmap.OP_KNOB_UNREALIZED)

@@ -11,7 +11,7 @@ the coupler flux op and/or the qubit-z flux op for either `flux_role`.
 
 There is no separate "pulse registry": QUAM serializes each operation inline in
 `quam_state/state.json` with a `"__class__"` import path and re-imports it on `Quam.load()`.
-`FlatTopCosinePulse` only needs to be importable (it is, via `customized.components.pulses`),
+`FlatTopCosinePulse` only needs to be importable (it is, via `scqo_qm.components.pulses`),
 and to exist as a named operation on the channel -- which is exactly what this script writes.
 
 >>> FILL IN the calibrated length / amplitude / edge_width below before running. <<<
@@ -25,7 +25,7 @@ Constraints (else FlatTopCosinePulse.waveform_function raises / QM rejects the c
 """
 
 from quam_config import Quam
-from customized.components.pulses import FlatTopCosinePulse
+from scqo_qm.components.pulses import FlatTopCosinePulse
 
 OP = "flattop_cosine"  # operation name played via node.parameters.coupler_operation / qubit_operation
 

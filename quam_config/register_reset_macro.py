@@ -16,7 +16,7 @@ The values here are PLACEHOLDERS. Run this once to persist into quam_state/state
 
 from quam.components.pulses import SquarePulse
 from quam_config import Quam
-from customized.components.macros.parametric_reset_macro import ParametricReset
+from scqo_qm.components.macros.parametric_reset_macro import ParametricReset
 
 FLUX_PULSE = "parametric_reset"  # z op played by the macro
 DRIVE_FREQUENCY = 375_000_000  # PLACEHOLDER - parametric drive frequency in Hz (z-line IF)

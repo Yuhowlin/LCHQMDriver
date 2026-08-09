@@ -16,7 +16,7 @@ The values here are PLACEHOLDERS. Run this once to persist into quam_state/state
 
 from quam.components.pulses import SquarePulse
 from quam_config import Quam
-from customized.components.macros.iswap_macro import ISwapImplementation
+from scqo_qm.components.macros.iswap_macro import ISwapImplementation
 
 FLUX_PULSE = "flattop_cosine"  # op name played on both control.z and coupler
 

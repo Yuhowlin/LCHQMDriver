@@ -1,7 +1,7 @@
 [project]
-name = "superconducting-calibrations"
+name = "scqo-qm"
 version = "0.1.0"
-description = "QM Superconducting Calibration Graphs"
+description = "Quantum Machines backend for the scqo instrument-agnostic experiment API + vendored official qualibrate calibrations"
 readme = "README.md"
 license = { text = "BSD-3-Clause" }
 requires-python = ">=3.10,<3.13"
@@ -25,26 +25,22 @@ dependencies = [
     "qiskit-experiments>=0.9.0",
     "tqdm>=4.67.1",
     "qiskit<2.0",
+    # the shared, vendor-free experiment API — a HARD dependency since the v1
+    # restructure (matches scqo-qblox; kills the old `uv run` uninstall trap)
+    "scqo",
 ]
 
-# The scqo integration (customized/scqo/) is optional: the qualibrate calibration
-# nodes never import scqo, so the core install stays QM-only. Install with the extra
-# (`pip install -e .[scqo]`) to use the QMBackend / scqo experiments.
-[project.optional-dependencies]
-scqo = ["scqo"]
-
 # Advertise the QM scqo experiments so Session.catalog() finds them without a manual
-# import. Loading needs the `scqo` extra installed; scqo's discovery skips this entry
-# gracefully when it (or the QM stack) is absent.
+# import (scqo loads this lazily on first catalog()).
 [project.entry-points."scqo.experiments"]
-lchqm = "customized.scqo.experiments"
+scqo_qm = "scqo_qm.experiments"
 
 # Advertise the QM BACKEND factory to the scqo CLI: a device whose current cooldown
-# setup says `backend = "qm"` resolves to this build_backend(cfg, setup) (scqo >=
-# 0.5.0; re-run `uv pip install -e` after adding — entry points register at install
+# setup says `backend = "qm"` resolves to this build_backend(cfg, setup, roster)
+# (re-run `uv pip install -e` after changing — entry points register at install
 # time, not import time).
 [project.entry-points."scqo.backends"]
-qm = "customized.scqo.backend_factory:build_backend"
+qm = "scqo_qm.scqo_backend:build_backend"
 
 [tool.uv.sources]
 scqo = { path = "../SCQO", editable = true }
@@ -60,7 +56,7 @@ build-backend = "hatchling.build"
 dev = ["ipykernel>=7.0.0a1", "pytest>=8.3.5"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["calibrations", "calibration_utils", "quam_config", "customized"]
+packages = ["calibrations", "calibration_utils", "quam_config", "customized", "scqo_qm"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -28,16 +28,16 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from customized.scqo.experiments.qubit_t1_ade import (
+from scqo_qm.experiments.qubit_t1_ade import (
     QMQubitT1Ade,
     discriminator_problems,
 )
-from customized.scqo.experiments.qubit_t1_bayesian import (
+from scqo_qm.experiments.qubit_t1_bayesian import (
     QMQubitT1Bayesian,
     confusion_matrix_problems,
 )
 
-_PROBES_DIR = Path(__file__).resolve().parents[1] / "customized" / "probes"
+_PROBES_DIR = Path(__file__).resolve().parents[1] / "scqo_qm" / "experiments"
 PROBE_ADE = _PROBES_DIR / "qubit_t1_ade.py"
 PROBE_BAYES = _PROBES_DIR / "qubit_t1_bayesian.py"
 
@@ -80,13 +80,13 @@ class TestDelayGeometry:
     def test_delay_mults_pinned_across_repos(self):
         """The probe and the neutral experiment must agree on the 1:3 spacing —
         the closed form is derived from exactly these multipliers."""
-        from customized.probes.qubit_t1_ade import DELAY_MULTS as probe_mults
+        from scqo_qm.experiments.qubit_t1_ade import DELAY_MULTS as probe_mults
         from scqo.experiments.qubit_t1_ade import DELAY_MULTS as neutral_mults
 
         assert tuple(probe_mults) == tuple(neutral_mults) == (0, 1, 3)
 
     def test_one_state_stream_per_delay(self):
-        from customized.probes.qubit_t1_ade import DELAY_MULTS, _STATE_STREAMS
+        from scqo_qm.experiments.qubit_t1_ade import DELAY_MULTS, _STATE_STREAMS
 
         assert len(_STATE_STREAMS) == len(DELAY_MULTS) == 3
 
@@ -152,11 +152,11 @@ class TestShellToProbeMapping:
                             "block_idx": xr.DataArray(np.arange(kwargs["num_blocks"]))}
 
         monkeypatch.setattr(
-            f"customized.probes.{probe_module_name}.build_program",
+            f"scqo_qm.experiments.{probe_module_name}.build_program",
             fake_build_program,
         )
         monkeypatch.setattr(
-            "customized.probes._lib.select_qubits",
+            "scqo_qm.experiments._lib.select_qubits",
             lambda machine, names, multiplexed: SimpleNamespace(
                 get_names=lambda: list(names)),
         )
@@ -167,10 +167,10 @@ class TestShellToProbeMapping:
         exp = _shell(QMQubitT1Ade, _stub_machine(),
                      num_blocks=7, num_averages=50, t0_ns=16,
                      t1_guess_s=40e-6, dt_factor=1.0)
-        prog, sweep_axes, module = exp.probe()
+        prog, sweep_axes, acquire_fn = exp.probe()
         assert prog == "PROG"
-        from customized.probes import qubit_t1_ade as ade_probe
-        assert module is ade_probe
+        from scqo_qm.experiments import qubit_t1_ade as ade_mod
+        assert acquire_fn is ade_mod.acquire
         assert captured["num_blocks"] == 7
         assert captured["n_avg"] == 50
         assert captured["t0_cycles"] == 4
@@ -184,9 +184,9 @@ class TestShellToProbeMapping:
         exp = _shell(QMQubitT1Bayesian, _stub_machine(),
                      num_blocks=5, num_probes=20, t1_prior_s=35e-6)
         exp._t1_prior_s = {"q1": 35e-6}  # define_sweep's job, done by run()
-        prog, sweep_axes, module = exp.probe()
-        from customized.probes import qubit_t1_bayesian as bayes_probe
-        assert module is bayes_probe
+        prog, sweep_axes, acquire_fn = exp.probe()
+        from scqo_qm.experiments import qubit_t1_bayesian as bayes_mod
+        assert acquire_fn is bayes_mod.acquire
         assert captured["num_blocks"] == 5
         assert captured["num_probes"] == 20
         assert captured["c_adaptive"] == pytest.approx(0.51)

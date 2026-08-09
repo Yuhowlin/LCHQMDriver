@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from customized.scqo.apply_distortion import (
+from scqo_qm.backend.apply_distortion import (
     apply_distortion_from_state,
     clear_distortion,
 )

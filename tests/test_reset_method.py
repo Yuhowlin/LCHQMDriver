@@ -2,7 +2,7 @@
 
 Active reset landed on the Qblox backend first; scqo widened the neutral
 ``reset_method`` Literal repo-wide, so the flag validates on every backend. The
-QM policy lives in one place, ``customized/scqo/experiments/_reset.py``:
+QM policy lives in one place, ``scqo_qm/experiments/_reset.py``:
 :func:`check_reset_method` refuses everything QM cannot honour BY NAME rather
 than thermalizing quietly, and :func:`reset_max_attempts` maps scqo's
 ``active_reset_rounds`` onto QUAM's upper-bound loop count.
@@ -34,15 +34,14 @@ from pathlib import Path
 
 import pytest
 
-from customized.scqo.experiments._reset import (
+from scqo_qm.experiments._reset import (
     ACTIVE_RESET_ATTR,
     check_reset_method,
     reset_max_attempts,
 )
 
 REPO = Path(__file__).resolve().parents[1]
-SHELLS = REPO / "customized" / "scqo" / "experiments"
-PROBES = REPO / "customized" / "probes"
+SHELLS = REPO / "scqo_qm" / "experiments"
 CARRIERS = {"qubit_relaxation", "qubit_ramsey", "qubit_echo", "qubit_power_rabi",
             "qubit_t1_ade", "qubit_t1_bayesian"}
 
@@ -51,7 +50,7 @@ def _shell(name, **params):
     """A registered shell with no backend: ``check_reset_method`` reads only
     ``.params`` and the class until it reaches the device, so skipping __init__
     keeps the pure-policy tests off the vendor stack entirely."""
-    import customized.scqo.experiments  # noqa: F401  (registers the QM shells)
+    import scqo_qm.experiments  # noqa: F401  (registers the QM shells)
     from scqo.experiments import get
 
     cls = get(name)
@@ -61,7 +60,7 @@ def _shell(name, **params):
 
 
 def _registered_names():
-    import customized.scqo.experiments  # noqa: F401
+    import scqo_qm.experiments  # noqa: F401
     from scqo.experiments import catalog
 
     return sorted(e["name"] for e in catalog())
@@ -135,7 +134,7 @@ def test_no_probe_hardcodes_a_reset_literal():
     Catches the next copy-paste of the old ``qubit.reset("thermal", ...)``."""
     pattern = re.compile(r"\.reset\(\s*['\"]")
     offenders = []
-    for folder in (PROBES, SHELLS):
+    for folder in (SHELLS,):
         for path in sorted(folder.glob("*.py")):
             for lineno, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):
@@ -281,7 +280,7 @@ def test_active_refuses_the_factory_default_depletion(
 def test_the_backend_refuses_before_it_probes(backend, stub_machine, roster):
     """The acquire() backstop fires check_reset_method before probe(), so a shell
     that forgot the helper still refuses. It works QM-free ONLY because the
-    backstop precedes the probes._lib import — do not reorder."""
+    backstop precedes the _lib import — do not reorder."""
     _calibrate(stub_machine)  # calibrated, so only the opt-in refusal can fire
     exp = _active_carrier("single_shot_readout", backend, roster)
 

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from customized.probes.qubit_spectroscopy_cryoscope import (
+from scqo_qm.experiments.qubit_spectroscopy_cryoscope import (
     resolve_drive_scale,
     validate_inputs,
 )

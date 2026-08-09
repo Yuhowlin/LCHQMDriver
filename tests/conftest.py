@@ -16,7 +16,7 @@ Two machine fixtures, deliberately:
   entity-resolution surface (component/components/snapshot, both flux shapes,
   the pair knobs) is covered on every run, toggle or no toggle. It is a stub of
   the vendor TREE only — every neutral conversion under test is the real
-  ``customized.quam_fields`` code.
+  ``scqo_qm.quam_fields`` code.
 
 The stub deliberately names its QUAM pair after the coupler (``coupler_q1_q2``,
 which is what quam_builder does) while the roster calls the composite ``q1_q2``
@@ -103,7 +103,7 @@ class ReadoutPulse:
 
     def __init__(self, length=2000, weights=None, angle=0.0,
                  amplitude=0.1, threshold=0.0, rus=0.0):
-        from customized import quam_fields
+        from scqo_qm import quam_fields
 
         self.length = length
         self.amplitude = amplitude
@@ -115,7 +115,7 @@ class ReadoutPulse:
 
     @property
     def integration_weights(self):
-        from customized import quam_fields
+        from scqo_qm import quam_fields
 
         if self._raw_weights == quam_fields.DEFAULT_INTEGRATION_WEIGHTS_REF:
             return [(1, self.length)]
@@ -227,7 +227,7 @@ def stub_machine():
 @pytest.fixture()
 def backend(stub_machine, roster):
     """A QMBackend over the stub tree — no instrument, no QUAM package."""
-    from customized.scqo.backend import QMBackend
+    from scqo_qm.backend.qm_backend import QMBackend
 
     return QMBackend(stub_machine, roster=roster)
 

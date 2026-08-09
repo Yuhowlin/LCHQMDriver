@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from customized.probes.qubit_ramsey_cryoscope import validate_inputs
+from scqo_qm.experiments.qubit_ramsey_cryoscope import validate_inputs
 
 
 class _Qubits(list):

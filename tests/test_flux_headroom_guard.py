@@ -15,7 +15,7 @@ clip anything — it only caps reach — and enforcing it there would refuse con
 that genuinely work today (the live 5Q4C couplers sit at 0.15 V).
 """
 
-from customized.quam_fields import flux_headroom_problems, flux_headroom_warnings
+from scqo_qm.quam_fields import flux_headroom_problems, flux_headroom_warnings
 
 from conftest import _coupler, _flux_line, make_stub_machine
 

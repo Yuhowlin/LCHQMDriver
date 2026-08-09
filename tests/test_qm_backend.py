@@ -1,4 +1,4 @@
-"""Tests for the scqo QM backend (customized.scqo).
+"""Tests for the scqo QM backend (scqo_qm).
 
 Three tiers:
 
@@ -12,13 +12,14 @@ Three tiers:
   alike, so there is no root class left for them to disagree about.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import xarray as xr
 
-from customized.scqo.backend import QMBackend, _progress_shot_total
+from scqo_qm.backend.qm_backend import QMBackend, _progress_shot_total
 
 
 # --------------------------------------------------------------------------- pure
@@ -173,7 +174,7 @@ def test_to_canonical_rejects_axis_size_mismatch():
 
 
 def test_catalog_registers_qm_experiments():
-    import customized.scqo  # noqa: F401  (side effect: register)
+    import scqo_qm  # noqa: F401  (side effect: register)
     from scqo import catalog
 
     names = {e["name"] for e in catalog()}
@@ -242,7 +243,7 @@ def test_flux_channel_serves_both_vendor_shapes(backend, stub_machine):
 
 
 def test_channel_views_round_trip_the_neutral_knobs(backend, stub_machine):
-    """Neutral get/set maps onto QUAM through customized.quam_fields; a
+    """Neutral get/set maps onto QUAM through scqo_qm.quam_fields; a
     drive_freq_hz write shifts both f_01 and xy.RF_frequency."""
     q2 = stub_machine.qubits["q2"]
     xy = backend.device.component("q2_xy")
@@ -348,7 +349,7 @@ def test_snapshot_reports_the_bound_knobs_per_entity(backend):
     """The pull-mode seed source: every realized channel reports exactly the
     knobs the fieldmap BINDS for its kind, and the composite reports the
     per-operation knobs the ROSTER compiled for it."""
-    from customized.scqo.fieldmap import FIELD_BINDINGS
+    from scqo_qm.backend.fieldmap import FIELD_BINDINGS
 
     snap = backend.device.snapshot()
     assert set(snap["q1_xy"]) == set(FIELD_BINDINGS["drive"])
@@ -570,7 +571,7 @@ def machine():
     # quam_state could not validate. Both the state file and the default now name
     # MixedTransmonQuam, which accepts fixed, tunable and mixed trees alike, so a
     # TypeError here is a real failure rather than a working-tree situation.
-    return quam_config.Quam.load()
+    return quam_config.Quam.load(str(Path(__file__).resolve().parents[1] / "quam_state"))
 
 
 @pytest.fixture(scope="module")
@@ -583,19 +584,19 @@ def live_roster(machine):
 
 def test_probe_matches_direct_build(machine, live_roster):
     """QMQubitRamsey/QMQubitPowerRabi.probe() must produce the same QUA program as calling the
-    LCHQM build_program directly with the mapped kwargs (proves the param mapping)."""
+    module-level build_program directly with the mapped kwargs (proves the param mapping)."""
     from qm import generate_qua_script
 
     def script(prog):  # drop the volatile "generated at <timestamp>" header line
         return "\n".join(ln for ln in generate_qua_script(prog, config).splitlines() if "generated at" not in ln)
 
-    from customized.probes._lib import select_qubits
-    from customized.probes import qubit_ramsey as ramsey_probe
-    from customized.probes import qubit_power_rabi as power_rabi_probe
-    from customized.probes import resonator_spectroscopy as resonator_spec_probe
-    from customized.scqo.experiments.qubit_ramsey import QMQubitRamsey
-    from customized.scqo.experiments.qubit_power_rabi import QMQubitPowerRabi
-    from customized.scqo.experiments.resonator_spectroscopy import QMResonatorSpectroscopy
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import qubit_ramsey as ramsey_probe
+    from scqo_qm.experiments import qubit_power_rabi as power_rabi_probe
+    from scqo_qm.experiments import _resonator_spectroscopy as resonator_spec_probe
+    from scqo_qm.experiments.qubit_ramsey import QMQubitRamsey
+    from scqo_qm.experiments.qubit_power_rabi import QMQubitPowerRabi
+    from scqo_qm.experiments.resonator_spectroscopy import QMResonatorSpectroscopy
 
     backend = QMBackend(machine, roster=live_roster)
     config = machine.generate_config()
@@ -637,7 +638,7 @@ def test_probe_matches_direct_build(machine, live_roster):
 
 
 def _preview_ramsey(machine, live_roster):
-    from customized.scqo.experiments.qubit_ramsey import QMQubitRamsey
+    from scqo_qm.experiments.qubit_ramsey import QMQubitRamsey
 
     backend = QMBackend(machine, roster=live_roster)
     exp = QMQubitRamsey(backend, QMQubitRamsey.Parameters(
@@ -789,11 +790,11 @@ def test_gate_target_probes_build_for_both_gates(machine, gate):
     target gates — and nothing imported the probe, so no test caught it. Build all
     three target_gate probes end-to-end on the live state for each gate, and prove
     the equator's install/restore leaves the stored QUAM alphas unchanged."""
-    from customized import quam_fields
-    from customized.probes import qubit_deterministic_benchmarking as db_probe
-    from customized.probes import qubit_drag_alternating as drag_alternating_probe
-    from customized.probes import qubit_drag_equator as drag_equator_probe
-    from customized.probes._lib import select_qubits
+    from scqo_qm import quam_fields
+    from scqo_qm.experiments import qubit_deterministic_benchmarking as db_probe
+    from scqo_qm.experiments import qubit_drag_alternating as drag_alternating_probe
+    from scqo_qm.experiments import qubit_drag_equator as drag_equator_probe
+    from scqo_qm.experiments._lib import select_qubits
 
     qubits_names = ["q4", "q5"]
     qubits = select_qubits(machine, qubits_names, multiplexed=True)
@@ -845,9 +846,9 @@ def test_absolute_punchout_probe_matches_direct_build(machine, live_roster):
     core run() loop solves the chain per point and swaps in the 1D detuning axis."""
     from qm import generate_qua_script
 
-    from customized.probes._lib import select_qubits
-    from customized.probes import resonator_spectroscopy as res_spec_probe
-    from customized.scqo.experiments.resonator_spectroscopy_power_chain import (
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import _resonator_spectroscopy as res_spec_probe
+    from scqo_qm.experiments.resonator_spectroscopy_power_chain import (
         QMResonatorSpectroscopyPowerChain,
     )
 
@@ -893,7 +894,7 @@ def test_power_amp_probe_builds_with_new_loop_order(machine, live_roster):
     from conftest import make_experiment
     from qm import generate_qua_script
 
-    from customized.scqo.experiments.resonator_spectroscopy_power_amp import (
+    from scqo_qm.experiments.resonator_spectroscopy_power_amp import (
         QMResonatorSpectroscopyPowerAmp,
     )
 
@@ -932,8 +933,8 @@ def test_readout_fidelity_probe_state_selection_compiles(machine, live_roster):
     generated before the parameter existed."""
     from qm import generate_qua_script
 
-    from customized.probes._lib import select_qubits
-    from customized.probes import readout_fidelity as fidelity_probe
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import _readout_fidelity as fidelity_probe
 
     config = machine.generate_config()
 
@@ -991,8 +992,8 @@ def test_swap_chevron_probe_builds_against_the_baked_config(machine, live_roster
     them. Pin that the config actually travels, and that the program compiles."""
     from qm import generate_qua_script
 
-    from customized.probes import pair_qq_chevron as chevron_probe
-    from customized.scqo.experiments.pair_swap_chevron import QMPairSwapChevron
+    from scqo_qm.experiments import pair_swap_chevron as chevron_probe
+    from scqo_qm.experiments.pair_swap_chevron import QMPairSwapChevron
 
     captured = {}
 
@@ -1040,8 +1041,8 @@ def test_xyz_delay_probe_builds_against_the_baked_config(machine, live_roster,
     config lacks. Pin that the baked ops travel and the program compiles."""
     from qm import generate_qua_script
 
-    from customized.probes import qubit_xyz_delay as xyz_probe
-    from customized.scqo.experiments.qubit_xyz_delay import QMQubitXyzDelay
+    from scqo_qm.experiments import qubit_xyz_delay as xyz_probe
+    from scqo_qm.experiments.qubit_xyz_delay import QMQubitXyzDelay
 
     captured = {}
 
@@ -1084,7 +1085,7 @@ def test_swap_flux_map_probe_builds(machine, live_roster):
     pair and the backend's shared fetch runs it."""
     from qm import generate_qua_script
 
-    from customized.scqo.experiments.pair_swap_flux_map import QMPairSwapFluxMap
+    from scqo_qm.experiments.pair_swap_flux_map import QMPairSwapFluxMap
 
     exp = _swap_experiment(QMPairSwapFluxMap, machine, live_roster,
                            min_coupler_flux_v=-0.02, max_coupler_flux_v=0.02,
@@ -1121,8 +1122,8 @@ def test_ramsey_cryoscope_probe_builds_against_the_baked_config(machine, live_ro
     COMPILES against the live QUAM (the pure validate_inputs test cannot)."""
     from qm import generate_qua_script
 
-    from customized.probes import qubit_ramsey_cryoscope as ramsey_cryoscope_probe
-    from customized.scqo.experiments.qubit_ramsey_cryoscope import QMQubitRamseyCryoscope
+    from scqo_qm.experiments import qubit_ramsey_cryoscope as ramsey_cryoscope_probe
+    from scqo_qm.experiments.qubit_ramsey_cryoscope import QMQubitRamseyCryoscope
 
     name = _live_flux_qubit(machine)
     if name is None:
@@ -1171,7 +1172,7 @@ def test_spectroscopy_cryoscope_probe_builds_against_the_live_quam(machine, live
     against the live QUAM (the pure validate_inputs test cannot)."""
     from qm import generate_qua_script
 
-    from customized.scqo.experiments.qubit_spectroscopy_cryoscope import (
+    from scqo_qm.experiments.qubit_spectroscopy_cryoscope import (
         QMQubitSpectroscopyCryoscope,
     )
 
@@ -1211,7 +1212,7 @@ def test_apply_exponential_filter_extends_a_live_quam_port(machine):
     Reassigning old+new re-parents the existing QuamList children and QUAM refuses
     ("Cannot overwrite parent attribute") — a plain-list stub cannot see this, so
     pin it against the real QUAM (snapshot + restore as plain lists, never saved)."""
-    from customized.scqo._distortion import apply_exponential_filter
+    from scqo_qm.backend._distortion import apply_exponential_filter
 
     name = _live_flux_qubit(machine)
     if name is None:
@@ -1242,8 +1243,8 @@ def test_active_reset_program_builds_on_live_state(machine, live_roster):
     never saved)."""
     from qm import generate_qua_script
 
-    from customized.probes._lib import select_qubits
-    from customized.probes import qubit_ramsey as ramsey_probe
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import qubit_ramsey as ramsey_probe
 
     # a live qubit whose xy carries both x90 (ramsey) and x180 (the reset pi)
     name = next((n for n, q in machine.qubits.items()
@@ -1280,8 +1281,8 @@ def test_ade_tracking_program_builds_on_live_state(machine, live_roster):
     in memory and restored (the module-scoped fixture is never saved)."""
     from qm import generate_qua_script
 
-    from customized.probes._lib import select_qubits
-    from customized.probes import qubit_t1_ade as ade_probe
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import qubit_t1_ade as ade_probe
 
     name = next((n for n, q in machine.qubits.items()
                  if "x180" in q.xy.operations and "readout" in q.resonator.operations),
@@ -1313,8 +1314,8 @@ def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
     written in memory and restored as plain lists (no QuamList re-parenting)."""
     from qm import generate_qua_script
 
-    from customized.probes._lib import select_qubits
-    from customized.probes import qubit_t1_bayesian as bayes_probe
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import qubit_t1_bayesian as bayes_probe
 
     name = next((n for n, q in machine.qubits.items()
                  if "x180" in q.xy.operations and "readout" in q.resonator.operations),
