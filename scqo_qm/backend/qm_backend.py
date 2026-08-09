@@ -1021,8 +1021,9 @@ class QMBackend(Backend):
         shots = _progress_shot_total(experiment)
         # A probe returns ONE of three shapes:
         #  - a ready-made xr.Dataset (drag_equator acquires itself with a baked config);
-        #  - (program, sweep_axes, probe_module): the module's own acquire() fetches
-        #    (tomography builds a heterogeneous-dims dataset per-shot);
+        #  - (program, sweep_axes, acquire): the fused module's own acquire
+        #    CALLABLE fetches (tomography/t1 trackers build heterogeneous-dims
+        #    datasets per-shot that XarrayDataFetcher refuses);
         #  - (program, sweep_axes): the shared _lib.acquire fetches (the common path).
         with self._thermalization_override(experiment):
             res = experiment.probe()
@@ -1030,8 +1031,7 @@ class QMBackend(Backend):
             raw = res
         else:
             if isinstance(res, tuple) and len(res) == 3:
-                program, sweep_axes, probe_module = res
-                acquire_fn = getattr(probe_module, "acquire", run_acquire)
+                program, sweep_axes, acquire_fn = res
             else:
                 program, sweep_axes = res
                 acquire_fn = run_acquire

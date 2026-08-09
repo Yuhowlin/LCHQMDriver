@@ -1282,7 +1282,7 @@ def test_ade_tracking_program_builds_on_live_state(machine, live_roster):
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
-    from scqo_qm.probes import qubit_t1_ade as ade_probe
+    from scqo_qm.experiments import qubit_t1_ade as ade_probe
 
     name = next((n for n, q in machine.qubits.items()
                  if "x180" in q.xy.operations and "readout" in q.resonator.operations),
@@ -1315,7 +1315,7 @@ def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
-    from scqo_qm.probes import qubit_t1_bayesian as bayes_probe
+    from scqo_qm.experiments import qubit_t1_bayesian as bayes_probe
 
     name = next((n for n, q in machine.qubits.items()
                  if "x180" in q.xy.operations and "readout" in q.resonator.operations),
