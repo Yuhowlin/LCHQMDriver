@@ -13,7 +13,7 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import xarray as xr
 
-from customized.node._qc_populations import plot_population_maps
+from scqo_qm.experiments._qc_populations import plot_population_maps
 
 
 def plot_amp_state_maps(

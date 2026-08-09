@@ -12,7 +12,7 @@ from typing import Dict
 import matplotlib.pyplot as plt
 import xarray as xr
 
-from customized.node._qc_populations import plot_populations
+from scqo_qm.experiments._qc_populations import plot_populations
 
 
 def plot_rounds_1d(

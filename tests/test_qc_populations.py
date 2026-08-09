@@ -1,5 +1,5 @@
 """Unit tests for the shared swap-reset population helpers
-(`customized.node._qc_populations`). Pure Python, no QM / hardware.
+(`scqo_qm.experiments._qc_populations`). Pure Python, no QM / hardware.
 
 Mirrors the per-shot discriminated-state schema the probes now save:
 `state` with dims `(qubit, shot, round)`.
@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from customized.node._qc_populations import (
+from scqo_qm.experiments._qc_populations import (
     joint_state_populations,
     marginal_populations,
     plot_population_maps,
