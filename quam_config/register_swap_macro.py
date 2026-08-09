@@ -30,11 +30,11 @@ pair = machine.qubit_pairs["q1_q2"]
 # coupler-driven and the control qubit only idles).
 pair.qubit_control.z.operations[FLUX_PULSE] = SquarePulse(
     amplitude=0.1,  # PLACEHOLDER - calibrate
-    length=100,     # PLACEHOLDER - calibrate (must match the swap duration)
+    length=64,     # PLACEHOLDER - calibrate (must match the swap duration)
 )
 
 # --- Attach the bare-callable macro under the key the node looks up ("iswap") -----------
-pair.macros["iswap"] = ISwapImplementation(flux_pulse=FLUX_PULSE)
+pair.macros["partial_swap"] = ISwapImplementation(flux_pulse=FLUX_PULSE)
 
 print("control.z ops:", list(pair.qubit_control.z.operations.keys()))
 print("coupler ops:", list(pair.coupler.operations.keys()))
