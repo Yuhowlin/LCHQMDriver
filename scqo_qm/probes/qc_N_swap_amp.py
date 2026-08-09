@@ -1,7 +1,7 @@
 """N-swap (swap-chain) x qubit-flux-amplitude acquisition probe: vendor code only
 (qm/quam/qualang_tools) - no qualibrate, no scqo, no scqat.
 
-A 2D variant of `scqo_qm.probes.qc_N_swap`: on top of the swap-count sweep (N, inner
+A 2D variant of the retired qc_N_swap probe (git history): on top of the swap-count sweep (N, inner
 axis) the **control-qubit flux amplitude of the swap macro is swept** (outer axis), the
 same knob `scqo_qm.probes.pair_qcq_fixed_time` sweeps in its `swap_via_macro` mode.
 Each swap of the chain is applied as `swap_pair.macros[swap_operation].apply(ctrl_amp=q_a)`:
