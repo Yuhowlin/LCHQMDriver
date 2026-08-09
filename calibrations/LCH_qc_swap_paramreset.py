@@ -7,7 +7,7 @@ from customized.node.LCH_qc_swap_paramreset import Parameters, analysis, plottin
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qc_swap_paramreset as probe
+from scqo_qm.probes import qc_swap_paramreset as probe
 
 
 # %% {Description}
@@ -26,7 +26,7 @@ definition). Analysis is intentionally an empty estimator: no fit and no state w
 the node renders a 1D population-vs-round line per measured qubit for visual inspection.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.qc_swap_paramreset`; the (no-op) estimate adapter and the plot live in
+`scqo_qm.probes.qc_swap_paramreset`; the (no-op) estimate adapter and the plot live in
 `customized.node.LCH_qc_swap_paramreset`.
 """
 

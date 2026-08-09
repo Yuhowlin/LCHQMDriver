@@ -8,7 +8,7 @@ from qualibrate import QualibrationNode
 from qualibration_libs.data import add_amplitude_and_phase, convert_IQ_to_V
 from qualibration_libs.analysis import peaks_dips
 
-from customized.quam_builder.architecture.superconducting import qubit
+from scqo_qm.quam_builder.architecture.superconducting import qubit
 from quam_config.instrument_limits import instrument_limits
 
 

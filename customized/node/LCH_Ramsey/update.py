@@ -11,7 +11,7 @@ Branches on the estimator's authoritative `model_type`:
 from dataclasses import dataclass
 from typing import Dict
 
-from customized import quam_fields
+from scqo_qm import quam_fields
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ def apply_update(qubit, upd: RamseyUpdate) -> None:
     `record_state_updates()` when GUI approval is wanted)."""
     # Shift f_01 and the xy drive RF together by +d_f01 (the shared mapping seeds f_01
     # from the drive RF first when the qubit is not yet calibrated). The sign follows
-    # the probe's NEGATED frame ramp (customized/probes/qubit_ramsey.py): the effective
+    # the probe's NEGATED frame ramp (scqo_qm/probes/qubit_ramsey.py): the effective
     # drive sits +detuning above the qubit, so a fringe faster than the applied detuning
     # means the qubit is HIGH by the difference. Official 06a_ramsey.py subtracts instead
     # -- it builds its own program with the opposite (un-negated) frame ramp.

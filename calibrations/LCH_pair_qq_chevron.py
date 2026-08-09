@@ -7,7 +7,7 @@ from customized.node.LCH_pair_qq_chevron import Parameters, analysis, plotting
 from qualibration_libs.parameters import get_qubit_pairs
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import pair_qq_chevron as probe
+from scqo_qm.probes import pair_qq_chevron as probe
 
 
 # %% {Description}
@@ -23,7 +23,7 @@ renders a 2D color map (control and target signals vs amplitude x duration) for 
 inspection.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.pair_qq_chevron`; the (no-op) estimate adapter and the plot live in
+`scqo_qm.probes.pair_qq_chevron`; the (no-op) estimate adapter and the plot live in
 `customized.node.LCH_pair_qq_chevron`.
 """
 

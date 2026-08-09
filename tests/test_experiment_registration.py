@@ -1,4 +1,4 @@
-"""Registration completeness for ``customized/scqo/experiments``.
+"""Registration completeness for ``scqo_qm/experiments``.
 
 Registration is a MANUAL side-effect import line per module in the package
 ``__init__.py`` (no autodiscovery). A module missing its line is a silently
@@ -12,7 +12,7 @@ needed, and the check works even for a module nothing imports.
 import ast
 from pathlib import Path
 
-EXPERIMENTS = Path(__file__).resolve().parents[1] / "customized" / "scqo" / "experiments"
+EXPERIMENTS = Path(__file__).resolve().parents[1] / "scqo_qm" / "experiments"
 
 
 def _imported_in_init():
@@ -37,12 +37,12 @@ def test_every_experiment_module_has_its_import_line():
     missing = sorted(modules - imported)
     assert not missing, (
         "experiment modules with no `from . import <name>` line in "
-        "customized/scqo/experiments/__init__.py — their @register never runs, "
+        "scqo_qm/experiments/__init__.py — their @register never runs, "
         f"so the experiment is invisible to scqo: {missing}"
     )
 
     stale = sorted(imported - modules)
     assert not stale, (
-        "customized/scqo/experiments/__init__.py imports modules that no longer "
+        "scqo_qm/experiments/__init__.py imports modules that no longer "
         f"exist: {stale}"
     )

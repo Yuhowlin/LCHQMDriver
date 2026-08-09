@@ -9,7 +9,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import resonator_spectroscopy as probe
+from scqo_qm.probes import resonator_spectroscopy as probe
 from customized.node.LCH_resonator_spectroscopy import Parameters, analysis, update
 
 # %% {Node initialisation}
@@ -22,7 +22,7 @@ The data is then post-processed by the scqat ResonatorSpectroscopyEstimator (sin
 This frequency is used to update the readout frequency in the state.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.resonator_spectroscopy` (shared with scqo); the scqat analysis adapter
+`scqo_qm.probes.resonator_spectroscopy` (shared with scqo); the scqat analysis adapter
 and update policy live in `customized.node.LCH_resonator_spectroscopy`.
 
 State update:

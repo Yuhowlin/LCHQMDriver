@@ -10,7 +10,7 @@ stays in the shell (it owns `node.outcomes`).
 from dataclasses import dataclass
 from typing import Dict
 
-from customized import quam_fields
+from scqo_qm import quam_fields
 
 
 @dataclass(frozen=True)

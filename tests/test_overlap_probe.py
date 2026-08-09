@@ -15,6 +15,7 @@ measured is a property of the actual tree, not of a stub.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -24,7 +25,7 @@ pytest.importorskip("qm")
 from conftest import recording_device  # noqa: E402
 from test_qm_backend import roster_toml_for  # noqa: E402
 
-from customized.scqo.backend import QMBackend  # noqa: E402
+from scqo_qm.backend.qm_backend import QMBackend  # noqa: E402
 from scqo.roster import parse_components  # noqa: E402
 
 TARGET = "q4"
@@ -32,7 +33,7 @@ TARGET = "q4"
 
 @pytest.fixture(scope="module")
 def machine():
-    return quam_config.Quam.load()
+    return quam_config.Quam.load(str(Path(__file__).resolve().parents[1] / "quam_state"))
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +66,7 @@ def _body(prog, config) -> list[str]:
 def _build(machine, live_roster, name, **params):
     from scqo.experiments import get
 
-    import customized.scqo.experiments  # noqa: F401  (registers the QM probes)
+    import scqo_qm.experiments  # noqa: F401  (registers the QM probes)
 
     backend = QMBackend(machine, roster=live_roster)
     cls = get(name)
@@ -89,8 +90,8 @@ def test_no_align_between_the_drive_and_the_measurement(machine, live_roster, co
 
     for prog, expect_barrier in ((sequential, True), (overlap, False)):
         body = _body(prog, config)
-        drive = next(i for i, ln in enumerate(body) if ln.startswith("play('saturation'"))
-        measure = next(i for i, ln in enumerate(body) if ln.startswith("measure('readout'"))
+        drive = next(i for i, ln in enumerate(body) if ln.replace(chr(34), chr(39)).startswith("play('saturation'"))
+        measure = next(i for i, ln in enumerate(body) if ln.replace(chr(34), chr(39)).startswith("measure('readout'"))
         assert drive < measure
         between = [ln for ln in body[drive + 1:measure] if ln.startswith("align(")]
         assert bool(between) is expect_barrier, body[drive:measure + 1]
@@ -104,14 +105,14 @@ def test_the_adc_lead_is_a_pre_tone_on_the_resonator(machine, live_roster, confi
                       acq_start_ns=400.0, drive_len_ns=600.0)
     body = _body(prog, config)
 
-    pre = [ln for ln in body if ln.startswith("play('readout', '")]
+    pre = [ln for ln in body if ln.replace(chr(34), chr(39)).startswith("play('readout', '")]
     assert len(pre) == 1, f"expected one readout pre-tone, got {pre}"
     assert re.search(r"duration=(\d+)", pre[0]).group(1) == "100"  # 400 ns / 4
     # ...and it is played BEFORE the measurement, on the same element
     assert body.index(pre[0]) < next(
-        i for i, ln in enumerate(body) if ln.startswith("measure('readout'"))
+        i for i, ln in enumerate(body) if ln.replace(chr(34), chr(39)).startswith("measure('readout'"))
 
-    drive = next(ln for ln in body if ln.startswith("play('saturation'"))
+    drive = next(ln for ln in body if ln.replace(chr(34), chr(39)).startswith("play('saturation'"))
     assert re.search(r"duration=(\d+)", drive).group(1) == "150"  # 600 ns / 4
 
 
@@ -123,9 +124,9 @@ def test_zero_lead_emits_no_pre_tone_and_the_drive_spans_the_tone(
     exp, prog = _build(machine, live_roster, "qubit_spectroscopy_overlap")
     body = _body(prog, config)
 
-    assert not [ln for ln in body if ln.startswith("play('readout', '")]
+    assert not [ln for ln in body if ln.replace(chr(34), chr(39)).startswith("play('readout', '")]
     readout_ns = exp.device.channel(TARGET, "readout").readout_duration_s * 1e9
-    drive = next(ln for ln in body if ln.startswith("play('saturation'"))
+    drive = next(ln for ln in body if ln.replace(chr(34), chr(39)).startswith("play('saturation'"))
     assert int(re.search(r"duration=(\d+)", drive).group(1)) == round(readout_ns / 4)
 
 
@@ -135,7 +136,7 @@ def test_targets_with_different_readout_windows_are_refused(machine, live_roster
     shifted peak on exactly the qubits nobody was watching."""
     from scqo.experiments import get
 
-    import customized.scqo.experiments  # noqa: F401
+    import scqo_qm.experiments  # noqa: F401
 
     backend = QMBackend(machine, roster=live_roster)
     cls = get("qubit_spectroscopy_overlap")

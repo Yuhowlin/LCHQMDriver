@@ -17,7 +17,7 @@ than a convention.
 
 from types import SimpleNamespace
 
-from customized.quam_fields import (
+from scqo_qm.quam_fields import (
     GOVERNED_COUPLER_FLUX_POINT,
     GOVERNED_FLUX_POINT,
     flux_point_problems,

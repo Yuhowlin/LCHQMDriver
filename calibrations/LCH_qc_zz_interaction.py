@@ -7,7 +7,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits, get_idle_times_in_clock_cycles
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qc_zz_interaction as probe
+from scqo_qm.probes import qc_zz_interaction as probe
 from customized.node.LCH_qc_zz_interaction import (
     Parameters,
     process_raw_dataset,

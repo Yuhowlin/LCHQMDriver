@@ -9,7 +9,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qubit_spectroscopy as probe
+from scqo_qm.probes import qubit_spectroscopy as probe
 from customized.node.LCH_qubit_spectroscopy import (
     Parameters,
     log_fitted_results,

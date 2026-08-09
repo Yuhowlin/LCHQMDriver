@@ -7,7 +7,7 @@ from customized.node.LCH_power_rabi import Parameters, analysis, update
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qubit_power_rabi as probe
+from scqo_qm.probes import qubit_power_rabi as probe
 
 
 # %% {Description}
@@ -32,7 +32,7 @@ State update:
     and update_x90 is enabled.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.power_rabi` (shared with scqo); the scqat analysis adapter and
+`scqo_qm.probes.power_rabi` (shared with scqo); the scqat analysis adapter and
 update policy live in `customized.node.LCH_power_rabi`.
 """
 

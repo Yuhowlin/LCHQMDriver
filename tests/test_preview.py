@@ -17,8 +17,8 @@ import pytest
 
 from conftest import make_experiment
 
-import customized.scqo.experiments  # noqa: F401  (import side effect: @register)
-from customized.scqo.backend import SELF_ACQUIRING_ATTR
+import scqo_qm.experiments  # noqa: F401  (import side effect: @register)
+from scqo_qm.backend.qm_backend import SELF_ACQUIRING_ATTR
 from scqo.experiments import catalog, get
 
 #: the shells whose probe() executes on the instrument and returns a ready
@@ -36,7 +36,7 @@ SELF_ACQUIRING = {
 def _qm_shells() -> dict[str, type]:
     """Every registered experiment whose class comes from THIS driver."""
     return {entry["name"]: get(entry["name"]) for entry in catalog()
-            if get(entry["name"]).__module__.startswith("customized.")}
+            if get(entry["name"]).__module__.startswith("scqo_qm.")}
 
 
 def test_declarations_match_the_self_acquiring_set_exactly():
@@ -55,7 +55,7 @@ def test_every_reason_is_a_nonempty_string():
 
 def test_refusal_fires_before_probe_and_creates_nothing(backend, roster,
                                                         tmp_path):
-    from customized.scqo.experiments.qubit_drag_alternating import (
+    from scqo_qm.experiments.qubit_drag_alternating import (
         QMQubitDragAlternating,
     )
 

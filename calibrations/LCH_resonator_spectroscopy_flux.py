@@ -10,7 +10,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import resonator_spectroscopy_flux as probe
+from scqo_qm.probes import resonator_spectroscopy_flux as probe
 from customized.node.LCH_resonator_spectroscopy_flux import (
     Parameters,
     process_raw_dataset,

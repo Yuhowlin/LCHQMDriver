@@ -17,7 +17,7 @@ population-vs-round view (`plot_populations`, one line per state) and the 2D
 population-vs-(round x amplitude) view (`plot_population_maps`, one color map per state).
 
 The joint computation generalizes the two-qubit precedent in
-`customized.probes.pair_qq_chevron` (P00/P01/P10/P11) to N qubits, but in Python.
+`scqo_qm.probes.pair_qq_chevron` (P00/P01/P10/P11) to N qubits, but in Python.
 
 Bitstring convention: the **first measured qubit is the leftmost / most-significant
 digit** (the `qubit` coordinate order is the order the probe reads them out).

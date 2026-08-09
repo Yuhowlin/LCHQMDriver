@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from customized.scqo._distortion import (
+from scqo_qm.backend._distortion import (
     apply_exponential_filter,
     clear_exponential_filter,
     to_exponential_filter,

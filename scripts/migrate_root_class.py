@@ -33,7 +33,7 @@ import shutil
 import sys
 
 NEW_ROOT = (
-    "customized.quam_builder.architecture.superconducting.qpu"
+    "scqo_qm.quam_builder.architecture.superconducting.qpu"
     ".mixed_quam.MixedTransmonQuam"
 )
 

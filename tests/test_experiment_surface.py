@@ -1,4 +1,4 @@
-"""The probes' door out of the neutral surface (``customized/scqo/experiments/_vendor.py``).
+"""The probes' door out of the neutral surface (``scqo_qm/experiments/_vendor.py``).
 
 QM probes take the raw QUAM tree and address it by VENDOR name, while scqo hands
 the experiment ROSTER names — a foreign flux source (``flux_component``) and a
@@ -19,7 +19,7 @@ from conftest import make_experiment
 
 
 def _flux_experiment(backend, roster, **kw):
-    from customized.scqo.experiments.resonator_spectroscopy_flux import (
+    from scqo_qm.experiments.resonator_spectroscopy_flux import (
         QMResonatorSpectroscopyFlux,
     )
 
@@ -28,7 +28,7 @@ def _flux_experiment(backend, roster, **kw):
 
 
 def test_flux_source_resolves_a_qubits_own_z_line(backend, roster):
-    from customized.scqo.experiments._vendor import flux_source_name
+    from scqo_qm.experiments._vendor import flux_source_name
 
     exp = _flux_experiment(backend, roster, flux_component="q2")
     assert flux_source_name(exp, "q2") == "q2"  # a key of machine.qubits
@@ -38,7 +38,7 @@ def test_flux_source_resolves_a_coupler_to_its_quam_pair(backend, roster):
     """The roster names the coupler MODE ``q1_q2_c``; the probe reaches it as
     ``machine.qubit_pairs['coupler_q1_q2'].coupler``. The join is the vendor
     OBJECT the backend resolved, never the name."""
-    from customized.scqo.experiments._vendor import flux_source_name
+    from scqo_qm.experiments._vendor import flux_source_name
 
     exp = _flux_experiment(backend, roster, flux_component="q1_q2_c")
     assert flux_source_name(exp, "q1_q2_c") == "coupler_q1_q2"
@@ -48,7 +48,7 @@ def test_flux_source_refuses_a_coupler_for_a_z_pulse_probe(backend, roster):
     """qubit_spectroscopy_flux plays the flux as a z PULSE on a QUAM qubit, and a
     tunable coupler has none — refused here with the reason, not deep inside the
     QUA build."""
-    from customized.scqo.experiments._vendor import flux_source_name
+    from scqo_qm.experiments._vendor import flux_source_name
 
     exp = _flux_experiment(backend, roster, flux_component="q1_q2_c")
     with pytest.raises(ValueError, match="coupler"):
@@ -60,7 +60,7 @@ def test_flux_source_refuses_an_entity_with_no_flux_channel(backend, roster):
     transmon with no flux rider, so the roster refuses before any vendor hop."""
     from scqo.roster import RosterError
 
-    from customized.scqo.experiments._vendor import flux_source_name
+    from scqo_qm.experiments._vendor import flux_source_name
 
     exp = _flux_experiment(backend, roster)
     with pytest.raises((RosterError, KeyError), match="flux"):
@@ -71,7 +71,7 @@ def test_pair_target_resolves_to_the_quam_pair_key(backend, roster):
     """``targets`` are ROSTER composite names; ``_lib.select_qubit_pairs``
     selects by QUAM key. QM names its pairs after the coupler, so the two
     genuinely differ."""
-    from customized.scqo.experiments._vendor import vendor_pair, vendor_pair_name
+    from scqo_qm.experiments._vendor import vendor_pair, vendor_pair_name
 
     exp = _pair_experiment(backend, roster)
     assert vendor_pair_name(exp, "q1_q2") == "coupler_q1_q2"
@@ -79,7 +79,7 @@ def test_pair_target_resolves_to_the_quam_pair_key(backend, roster):
 
 
 def _pair_experiment(backend, roster, measure="low"):
-    from customized.scqo.experiments.pair_zz_coupler import QMPairZZCoupler
+    from scqo_qm.experiments.pair_zz_coupler import QMPairZZCoupler
 
     params = QMPairZZCoupler.Parameters(targets=["q1_q2"], measure=measure)
     return make_experiment(QMPairZZCoupler, backend, roster, params)
@@ -97,7 +97,7 @@ def test_pair_measure_role_maps_onto_the_vendor_side(backend, roster, measure, s
 def _swap_experiment(cls_name, backend, roster, **kw):
     import importlib
 
-    module = importlib.import_module(f"customized.scqo.experiments.{cls_name}")
+    module = importlib.import_module(f"scqo_qm.experiments.{cls_name}")
     cls = next(v for k, v in vars(module).items() if k.startswith("QMPair"))
     return make_experiment(cls, backend, roster,
                            cls.Parameters(targets=["q1_q2"], **kw))
@@ -114,7 +114,7 @@ def test_swap_map_role_selectors_map_onto_the_vendor_side(backend, roster, modul
     carries the pulse) are independent roster ROLES; the probes take vendor
     control/target. The stub pair is control=q1 / target=q2 while the roster
     says high=q2 / low=q1, so a positional guess would invert both."""
-    from customized.scqo.experiments._vendor import role_side
+    from scqo_qm.experiments._vendor import role_side
 
     exp = _swap_experiment(module, backend, roster, drive_side=side, flux_side=side)
     assert role_side(exp, exp.params.drive_side, field="drive_side") == vendor
@@ -127,7 +127,7 @@ def test_swap_map_high_side_orientation_drives_the_reduction(backend, roster, mo
     """``reduce_raw`` labels the joint populations by ROLE, and the probes label
     them by vendor side (first digit = control). The orientation is resolved
     once, here."""
-    from customized.scqo.experiments._vendor import role_side
+    from scqo_qm.experiments._vendor import role_side
 
     exp = _swap_experiment(module, backend, roster)
     assert role_side(exp, "high", field="targets") == "target"  # roster high=q2
@@ -139,7 +139,7 @@ def test_qc_n_swap_amp_refuses_non_control_roles(backend, roster):
     role selection resolving elsewhere is refused BY NAME before any QUA is
     built. The stub pair is control=q1 while the roster's high=q2, so
     drive_side='high' resolves to the vendor target — the refusing case."""
-    from customized.scqo.experiments.qc_n_swap_amp import QMQcNSwapAmp
+    from scqo_qm.experiments.qc_n_swap_amp import QMQcNSwapAmp
 
     exp = make_experiment(QMQcNSwapAmp, backend, roster,
                           QMQcNSwapAmp.Parameters(targets=["q1_q2"],
@@ -158,8 +158,8 @@ def test_role_side_refuses_the_selected_member_without_a_flux_channel(backend):
     from scqo.roster import parse_components
 
     from conftest import ROSTER_TOML
-    from customized.scqo.backend import QMBackend
-    from customized.scqo.experiments._vendor import role_side
+    from scqo_qm.backend.qm_backend import QMBackend
+    from scqo_qm.experiments._vendor import role_side
 
     # same chip, but q2's flux wire is gone -> roster high (=q2) has no flux
     no_z2 = parse_components(ROSTER_TOML.replace('[lines.z2]\nflux = ["q2"]\n\n', ""))
@@ -172,7 +172,7 @@ def test_role_side_refuses_the_selected_member_without_a_flux_channel(backend):
 
 
 def _gef_experiment(backend, roster, **kw):
-    from customized.scqo.experiments.single_shot_readout_gef import QMSingleShotReadoutGEF
+    from scqo_qm.experiments.single_shot_readout_gef import QMSingleShotReadoutGEF
 
     return make_experiment(QMSingleShotReadoutGEF, backend, roster,
                            QMSingleShotReadoutGEF.Parameters(targets=["q1"], **kw))
@@ -201,13 +201,13 @@ def test_gef_passes_three_states_and_the_readout_shift_through(backend, roster, 
     """The three-state program is the two-state one parameterized, so what the
     shell owes the probe is exactly ``prepared_states`` and the per-run readout
     detuning."""
-    from customized.probes import readout_fidelity
+    from scqo_qm.probes import readout_fidelity
 
     _grant_ef_surface(backend.machine)
     seen = {}
     monkeypatch.setattr(readout_fidelity, "build_program",
                         lambda machine, qubits, **kw: seen.update(kw) or ("prog", {}))
-    monkeypatch.setattr("customized.probes._lib.select_qubits",
+    monkeypatch.setattr("scqo_qm.experiments._lib.select_qubits",
                         lambda machine, targets, **kw: list(targets))
 
     exp = _gef_experiment(backend, roster, readout_freq_shift_hz=-600e3)
@@ -221,13 +221,13 @@ def test_thermal_population_probe_prepares_the_ground_state_only(backend, roster
                                                                  monkeypatch):
     """One prepared state, no drive pulse: the cloud is whatever the passive wait
     leaves behind. Anything else would measure the thing it is trying to count."""
-    from customized.probes import readout_fidelity
-    from customized.scqo.experiments.qubit_thermal_population import QMQubitThermalPopulation
+    from scqo_qm.probes import readout_fidelity
+    from scqo_qm.experiments.qubit_thermal_population import QMQubitThermalPopulation
 
     seen = {}
     monkeypatch.setattr(readout_fidelity, "build_program",
                         lambda machine, qubits, **kw: seen.update(kw) or ("prog", {}))
-    monkeypatch.setattr("customized.probes._lib.select_qubits",
+    monkeypatch.setattr("scqo_qm.experiments._lib.select_qubits",
                         lambda machine, targets, **kw: list(targets))
 
     exp = make_experiment(QMQubitThermalPopulation, backend, roster,
@@ -240,7 +240,7 @@ def test_thermal_population_probe_prepares_the_ground_state_only(backend, roster
 def test_single_shot_readout_addresses_the_readout_channel(backend, roster):
     """The discriminator proposal writes through the READOUT CHANNEL entity — the
     qubit MODE name carries no knobs since the greenfield split."""
-    from customized.scqo.experiments.single_shot_readout import QMSingleShotReadout
+    from scqo_qm.experiments.single_shot_readout import QMSingleShotReadout
 
     exp = make_experiment(QMSingleShotReadout, backend, roster,
                           QMSingleShotReadout.Parameters(targets=["q1"]))

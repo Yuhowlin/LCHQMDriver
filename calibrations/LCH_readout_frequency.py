@@ -10,7 +10,7 @@ from customized.node.LCH_readout_frequency import Parameters, analysis, update
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import readout_frequency as probe
+from scqo_qm.probes import readout_frequency as probe
 
 
 # %% {Description}
@@ -18,7 +18,7 @@ description = """
         Ask LCH
 
         This node is a thin qualibrate shell: the acquisition probe lives in
-        `customized.probes.readout_frequency` (shared with scqo); the scqat analysis
+        `scqo_qm.probes.readout_frequency` (shared with scqo); the scqat analysis
         adapter and update policy live in `customized.node.LCH_readout_frequency`.
 """
 

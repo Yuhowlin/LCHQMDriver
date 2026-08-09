@@ -7,7 +7,7 @@ from customized.node.LCH_pair_qcq_fixed_time import Parameters, analysis, plotti
 from qualibration_libs.parameters import get_qubit_pairs
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import pair_qcq_fixed_time as probe
+from scqo_qm.probes import pair_qcq_fixed_time as probe
 
 
 # %% {Description}
@@ -29,7 +29,7 @@ Analysis is intentionally an empty estimator: no fit and no state writeback. The
 renders a 2D color map (joint populations P00/P01/P10/P11) per qubit pair.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.pair_qcq_fixed_time`; the (no-op) estimate adapter and the
+`scqo_qm.probes.pair_qcq_fixed_time`; the (no-op) estimate adapter and the
 plot live in `customized.node.LCH_pair_qcq_fixed_time`.
 """
 

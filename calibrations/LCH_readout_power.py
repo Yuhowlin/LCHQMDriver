@@ -7,7 +7,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import readout_power as probe
+from scqo_qm.probes import readout_power as probe
 from customized.node.LCH_readout_power import (
     Parameters,
 )

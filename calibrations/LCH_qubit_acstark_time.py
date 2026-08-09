@@ -9,7 +9,7 @@ from customized.node.LCH_qubit_acstark_time import Parameters, analysis
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qubit_acstark_time as probe
+from scqo_qm.probes import qubit_acstark_time as probe
 
 # %% {Description}
 description = """
@@ -20,7 +20,7 @@ line. Locating the AC-Stark-shifted qubit line per delay traces the resonator ph
 number filling up and ringing down in time.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.qubit_acstark_time`; the scqat estimate adapter
+`scqo_qm.probes.qubit_acstark_time`; the scqat estimate adapter
 (`ReadoutPulsePhotonEstimator`) lives in `customized.node.LCH_qubit_acstark_time`.
 """
 

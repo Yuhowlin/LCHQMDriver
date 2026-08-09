@@ -23,7 +23,7 @@ build-time refusal.
 
 import pytest
 
-from customized.probes._flux_limits import (
+from scqo_qm.experiments._flux_limits import (
     check_flux_bias_absolute,
     check_flux_pulse_relative,
     dac_rail_v,

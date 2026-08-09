@@ -1,4 +1,4 @@
-"""The mixed fixed/tunable QUAM root (customized.quam_builder ... mixed_quam).
+"""The mixed fixed/tunable QUAM root (scqo_qm.quam_builder ... mixed_quam).
 
 The vendor roots force a device to be ALL fixed-frequency or ALL flux-tunable:
 ``FluxTunableQuam``'s flux helpers assume every qubit has a flux line, and
@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from customized.quam_builder.architecture.superconducting.qpu.mixed_quam import (
+from scqo_qm.quam_builder.architecture.superconducting.qpu.mixed_quam import (
     MixedTransmonQuam,
     flux_line,
 )
@@ -132,7 +132,7 @@ def test_pairwise_flux_point_refuses_a_qubit():
 def test_refusals_raise_rather_than_assert():
     """The vendor used bare asserts, which vanish under python -O. These are real
     caller errors and must survive optimisation."""
-    import customized.quam_builder.architecture.superconducting.qpu.mixed_quam as mod
+    import scqo_qm.quam_builder.architecture.superconducting.qpu.mixed_quam as mod
     import inspect
 
     src = inspect.getsource(mod.MixedTransmonQuam.set_all_fluxes)

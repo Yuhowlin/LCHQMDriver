@@ -28,9 +28,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from customized.scqo.experiments.qubit_parity_switch_continuous import _cycles
+from scqo_qm.experiments.qubit_parity_switch_continuous import _cycles
 
-_PROBES_DIR = Path(__file__).resolve().parents[1] / "customized" / "probes"
+_PROBES_DIR = Path(__file__).resolve().parents[1] / "scqo_qm" / "probes"
 PROBE_CONTINUOUS = _PROBES_DIR / "qubit_parity_switch_continuous.py"
 PROBE_DISCRETE = _PROBES_DIR / "qubit_parity_switch_discrete.py"
 
@@ -79,7 +79,7 @@ class TestCycleConversion:
 class TestShotPeriod:
 
     def test_sums_the_scheduled_durations(self):
-        from customized.scqo.experiments.qubit_parity_switch_continuous import (
+        from scqo_qm.experiments.qubit_parity_switch_continuous import (
             QMQubitParitySwitchContinuous,
         )
 
@@ -90,7 +90,7 @@ class TestShotPeriod:
         assert period == pytest.approx(5080e-9)
 
     def test_zero_depletion_shortens_the_period(self):
-        from customized.scqo.experiments.qubit_parity_switch_continuous import (
+        from scqo_qm.experiments.qubit_parity_switch_continuous import (
             QMQubitParitySwitchContinuous,
         )
 
@@ -108,7 +108,7 @@ class TestDiscreteCyclePeriod:
 
     @staticmethod
     def _shell():
-        from customized.scqo.experiments.qubit_parity_switch_discrete import (
+        from scqo_qm.experiments.qubit_parity_switch_discrete import (
             QMQubitParitySwitchDiscrete,
         )
         return QMQubitParitySwitchDiscrete

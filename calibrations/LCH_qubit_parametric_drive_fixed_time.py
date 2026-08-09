@@ -8,7 +8,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qubit_parametric_drive_fixed_time as probe
+from scqo_qm.probes import qubit_parametric_drive_fixed_time as probe
 from customized.node.LCH_qubit_parametric_drive_fixed_time import Parameters
 
 

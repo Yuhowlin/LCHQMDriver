@@ -6,7 +6,7 @@ from quam_config import Quam
 from qualibration_libs.parameters import get_qubits, get_idle_times_in_clock_cycles
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qubit_ramsey as probe
+from scqo_qm.probes import qubit_ramsey as probe
 from customized.node.LCH_Ramsey import Parameters, analysis, update
 
 
@@ -21,7 +21,7 @@ description = """
         the beat case records `q.charge_dispersion` from the frequency split.
 
         This node is a thin qualibrate shell: the acquisition probe lives in
-        `customized.probes.ramsey` (shared with scqo); the scqat analysis adapter
+        `scqo_qm.probes.ramsey` (shared with scqo); the scqat analysis adapter
         and update policy live in `customized.node.LCH_Ramsey`.
 """
 

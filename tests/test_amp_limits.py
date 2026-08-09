@@ -9,7 +9,7 @@ already booked, with the simulator showing nothing.
 import numpy as np
 import pytest
 
-from customized.probes._amp_limits import MAX_AMP_SCALE, check_amp_scale_window
+from scqo_qm.experiments._amp_limits import MAX_AMP_SCALE, check_amp_scale_window
 
 
 def test_a_window_inside_the_qua_range_passes():
@@ -52,15 +52,15 @@ def test_only_one_module_defines_the_bound():
     DAC-rail constants — same rule, applied to ``amp()``'s bound.
 
     Static (AST) rather than import-based: a copy would be caught even in a probe
-    no test imports. Scans `customized/probes/` AND the fused scqo experiments
+    no test imports. Scans `scqo_qm/probes/` AND the fused scqo experiments
     dir, where new experiments live.
     """
     import ast
     import pathlib
 
-    customized = pathlib.Path(__file__).resolve().parents[1] / "customized"
+    pkg = pathlib.Path(__file__).resolve().parents[1] / "scqo_qm"
     offenders = []
-    for folder in (customized / "probes", customized / "scqo" / "experiments"):
+    for folder in (pkg / "probes", pkg / "experiments"):
         for path in sorted(folder.glob("*.py")):
             if path.name == "_amp_limits.py":
                 continue
@@ -69,8 +69,8 @@ def test_only_one_module_defines_the_bound():
                     continue
                 for target in node.targets:
                     if isinstance(target, ast.Name) and target.id.lstrip("_") == "MAX_AMP_SCALE":
-                        offenders.append(f"{path.relative_to(customized)}:{node.lineno}")
+                        offenders.append(f"{path.relative_to(pkg)}:{node.lineno}")
     assert offenders == [], (
         "these define their own copy of the QUA amplitude_scale bound; import "
-        f"MAX_AMP_SCALE from customized.probes._amp_limits instead: {offenders}"
+        f"MAX_AMP_SCALE from scqo_qm.experiments._amp_limits instead: {offenders}"
     )

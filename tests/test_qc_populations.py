@@ -226,7 +226,7 @@ class _Reducer:
 
 
 def _reduce(high_side, raw):
-    from customized.scqo.experiments._pair_roles import JointPopulationMixin
+    from scqo_qm.experiments._pair_roles import JointPopulationMixin
 
     reducer = type("R", (JointPopulationMixin, _Reducer), {})(high_side)
     return reducer.reduce_raw(raw)
@@ -289,7 +289,7 @@ def _per_shot_state() -> xr.DataArray:
 def test_member_states_reorder_and_rename_to_the_schema(high_side):
     """_member_states maps the vendor readout order onto the schema's ROLE order
     (member=[high, low]) and renames every axis to the neutral names."""
-    from customized.scqo.experiments.qc_n_swap_amp import _member_states
+    from scqo_qm.experiments.qc_n_swap_amp import _member_states
 
     da = _member_states(_per_shot_state(), high_side)
     assert da.dims == ("member", "shot_idx", "flux_amp_v", "swap_count")
@@ -302,7 +302,7 @@ def test_member_states_reorder_and_rename_to_the_schema(high_side):
 def test_member_states_reduce_to_the_exact_joint_distribution():
     """The per-shot path and scqo's shared reducer together yield the joint
     distribution the average mode would have stored — same numbers, same labels."""
-    from customized.scqo.experiments.qc_n_swap_amp import _member_states
+    from scqo_qm.experiments.qc_n_swap_amp import _member_states
     from scqo.experiments import states_to_joint_population
 
     da = _member_states(_per_shot_state(), "control")

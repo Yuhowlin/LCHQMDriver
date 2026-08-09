@@ -7,7 +7,7 @@ from customized.node.LCH_qc_reset_check import Parameters, analysis, plotting
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qc_reset_check as probe
+from scqo_qm.probes import qc_reset_check as probe
 
 
 # %% {Description}
@@ -32,7 +32,7 @@ Analysis is intentionally an empty estimator: no fit and no state writeback; the
 the overlay for visual inspection.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.qc_reset_check`; the (no-op) estimate adapter and the plot live in
+`scqo_qm.probes.qc_reset_check`; the (no-op) estimate adapter and the plot live in
 `customized.node.LCH_qc_reset_check`.
 """
 

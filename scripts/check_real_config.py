@@ -52,8 +52,8 @@ def main() -> int:
     machine = Quam.load(str(work))
     print(f"[1/5] loaded QUAM | qubits: {list(machine.qubits)}")
 
-    import customized.scqo.experiments  # noqa: F401
-    from customized.scqo.backend import QMDeviceModel
+    import scqo_qm.experiments  # noqa: F401
+    from scqo_qm.backend.qm_backend import QMDeviceModel
     from scqo import Session
     from scqo.testing import SimulatedBackend
 

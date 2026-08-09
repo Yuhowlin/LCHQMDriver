@@ -11,7 +11,7 @@ from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 from qualibration_libs.core import tracked_updates
 
-from customized.probes import resonator_spectroscopy_power as probe
+from scqo_qm.probes import resonator_spectroscopy_power as probe
 from customized.node.LCH_resonator_spectroscopy_power import Parameters, analysis, update
 
 # %% {Node initialisation}
@@ -29,7 +29,7 @@ ResonatorSpectroscopyPowerEstimator: it fits the resonator dip power-by-power
 centre stops shifting.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.resonator_spectroscopy_power` (shared with scqo); the scqat
+`scqo_qm.probes.resonator_spectroscopy_power` (shared with scqo); the scqat
 analysis adapter and update policy live in `customized.node.LCH_resonator_spectroscopy_power`.
 
 Prerequisites:

@@ -15,7 +15,7 @@ def fit(ds_raw: xr.Dataset) -> Tuple[Dict, Dict, object]:
     ReadoutFreqFidelityEstimator (figures skipped here).
 
     `ds_raw` already carries the I/Q vars and shot_idx/frequency/prepared_state
-    coords that scqat expects (see `customized/probes/readout_frequency`), so no
+    coords that scqat expects (see `scqo_qm/probes/readout_frequency`), so no
     renaming is needed.
 
     Returns (fit_results, sep_results, estimator):

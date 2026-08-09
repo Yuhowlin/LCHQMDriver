@@ -7,7 +7,7 @@ from customized.node.LCH_qc_N_swap import Parameters, analysis, plotting
 from qualibration_libs.parameters import get_qubits
 from qualibration_libs.runtime import simulate_and_plot
 
-from customized.probes import qc_N_swap as probe
+from scqo_qm.probes import qc_N_swap as probe
 
 
 # %% {Description}
@@ -27,7 +27,7 @@ QUAM macro definition). Analysis is intentionally an empty estimator: no fit and
 writeback; the plot is for visual inspection.
 
 This node is a thin qualibrate shell: the acquisition probe lives in
-`customized.probes.qc_N_swap`; the (no-op) estimate adapter and the plot live in
+`scqo_qm.probes.qc_N_swap`; the (no-op) estimate adapter and the plot live in
 `customized.node.LCH_qc_N_swap`.
 """
 

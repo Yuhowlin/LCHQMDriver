@@ -8,7 +8,7 @@ from qualibration_libs.parameters import get_qubit_pairs
 from qualibration_libs.runtime import simulate_and_plot
 from quam_config import Quam
 
-from customized.probes import pair_qcq_zz_coupler_freq as probe
+from scqo_qm.probes import pair_qcq_zz_coupler_freq as probe
 from customized.node.LCH_pair_qcq_zz_coupler_freq import (
     Parameters,
     fit_raw_data,

@@ -1,4 +1,4 @@
-"""Unit tests for the single neutral-field <-> QUAM mapping (customized.quam_fields).
+"""Unit tests for the single neutral-field <-> QUAM mapping (scqo_qm.quam_fields).
 
 Pure attribute access on a stub qubit -- no qm/quam needed. The existing
 ``test_*_update.py`` files exercise the same primitives through each node's
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from customized import quam_fields
+from scqo_qm import quam_fields
 
 
 def _qubit(*, f_01=5.0e9, xy_rf=5.1e9, res_rf=6.0e9, res_f01=6.0e9):
@@ -287,7 +287,7 @@ def test_qm_channel_views_use_the_shared_mapping():
     the SAME QUAM qubit — the drive knobs on q.xy, the readout knobs on
     q.resonator, the standing bias on q.z — so each is constructed with its own
     entity name and subtree, exactly as component() does."""
-    from customized.scqo.backend import (
+    from scqo_qm.backend.qm_backend import (
         QMDriveChannel, QMFluxChannel, QMReadoutChannel,
     )
 
@@ -343,7 +343,7 @@ def test_qm_flux_view_serves_a_coupler_without_a_qubit():
     """The SECOND vendor shape behind one neutral knob: a coupler's flux channel
     has no QUAM qubit at all — the view is built on the TunableCoupler directly
     and idle_flux follows its own flux-point vocabulary (off -> decouple_offset)."""
-    from customized.scqo.backend import QMFluxChannel
+    from scqo_qm.backend.qm_backend import QMFluxChannel
 
     coupler = SimpleNamespace(id="coupler_q1_q2", flux_point="off",
                               decouple_offset=0.0, interaction_offset=0.2)
