@@ -28,6 +28,9 @@ scqo_qm/
                          #   + QMQubitPair (composite view over the QUAM qubit_pair);
                          #   acquire()/preview() live here
     fieldmap.py          # declarative neutral->vendor field catalog (pure data, per channel kind)
+    roster_gen.py        # roster_toml_for(machine): derive a schema-3 roster from a live QUAM
+                         #   tree (test fixtures + scripts/check_real_config.py; the REAL roster
+                         #   is <data_root>/<device>/components.toml)
     _distortion.py       # flux-distortion facts -> exponential-filter arithmetic (pure)
     apply_distortion.py  # operator CLI: python -m scqo_qm.backend.apply_distortion
   experiments/
@@ -212,7 +215,7 @@ experiment — never add per-command wrappers). `simulated` is the practice mode
 Run as **`.venv\Scripts\python.exe -m pytest tests\ -q`** (the repo venv is built from
 `requirements-qm.lock.txt` + editable scqo/scqat; avoid bare `uv run` — its sync would rebuild
 the env from pyproject, displacing the lockfile pin authority. `uv run --no-sync` is the
-acceptable alternative). **~308 tests, ~40 s — the full suite IS the targeted run**; run it
+acceptable alternative). **~309 tests, ~100 s — the full suite IS the targeted run**; run it
 before every commit. Live-state tests load the repo-relative `quam_state/` (hermetic — no
 `~/.qualibrate` dependency).
 
@@ -229,6 +232,7 @@ before every commit. Live-state tests load the repo-relative `quam_state/` (herm
 | `test_qm_backend.py` | entity surface on the stub; builder-vs-class mapping equivalence, baked-config self-acquisition, active-reset + tracker builds on the LIVE quam_state; preview | yes |
 | `test_overlap_probe.py` | concurrent-tone timing asserted on generated QUA (quote-agnostic vs qm versions) | yes |
 | `test_scqo_glue.py` | the `scqo` CLI works in THIS venv + the qm factory (slowest) | yes |
+| `test_check_real_config.py` | `scripts/check_real_config.py` end-to-end to its PASS line on the live quam_state (subprocess, ~14 s — exit code + final line asserted, never a pipeline fragment) | yes |
 
 ## Workspace Packages (Read-Only)
 The vendor stack (`qm` → `quam` → `quam_builder` → `qualibrate`) is available read-only; do NOT

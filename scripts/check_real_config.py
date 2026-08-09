@@ -1,6 +1,6 @@
 """Self-test the scqo stack against a REAL QUAM state (OPX1000) — no hardware needed.
 
-    python scripts/check_real_config.py D:\\qpu_data\\SQ_demo\\QM_OPX1000_config
+    python scripts/check_real_config.py D:\\qpu_data_dev\\5Q4C\\cd1\\qm_5q\\backend_config
     python scripts/check_real_config.py <state_dir> --qubits q1 q2
 
 Loads your ``state.json`` + ``wiring.json``, then runs the full scqo pipeline with
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root for `c
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("state_dir", help="folder holding state.json + wiring.json")
-    parser.add_argument("--qubits", nargs="+", help="qubits to exercise (default: all in the state)")
+    parser.add_argument("--qubits", nargs="+", help="qubits to exercise (default: all readable in the state)")
     args = parser.parse_args()
 
     source = Path(args.state_dir)
@@ -53,43 +53,66 @@ def main() -> int:
     print(f"[1/5] loaded QUAM | qubits: {list(machine.qubits)}")
 
     import scqo_qm.experiments  # noqa: F401
-    from scqo_qm.backend.qm_backend import QMDeviceModel
     from scqo import Session
+    from scqo.roster import parse_components
     from scqo.testing import SimulatedBackend
+    from scqo_qm.backend.qm_backend import QMDeviceModel
+    from scqo_qm.backend.roster_gen import roster_toml_for
 
-    dm = QMDeviceModel(machine)
+    # The driver resolves every name through the ROSTER (q1_ro -> the readout
+    # knobs of vendor qubit q1), so it is needed before the device model. This
+    # throwaway self-test derives one from the QUAM tree itself; the REAL
+    # roster lives in <data_root>/<device>/components.toml and is what
+    # `scqo run` uses.
+    roster = parse_components(roster_toml_for(machine))
+
+    dm = QMDeviceModel(machine, roster)
     snap = dm.snapshot()
-    for name, fields in snap.items():
+    for name, fields in snap.items():  # keyed by CHANNEL entity (q1_ro, q1_xy, ...)
         print(f"      {name}: {fields}")
-    unreadable = [q for q, f in snap.items() if any(v is None for v in f.values())]
-    qubits = args.qubits or [q for q in snap if q not in unreadable]
+
+    # The two experiments below anchor on these knobs; a real lab state
+    # carries uncalibrated qubits (value None), which are skipped, not run.
+    needed = {q: ((f"{q}_ro", "readout_freq_hz"), (f"{q}_xy", "pi_amp"))
+              for q in machine.qubits}
+    unreadable = [q for q, pairs in needed.items()
+                  if any(snap.get(ch, {}).get(field) is None for ch, field in pairs)]
+    qubits = args.qubits or [q for q in needed if q not in unreadable]
+    if not qubits:
+        raise SystemExit(f"no readable qubits in this state (uncalibrated: {unreadable}) "
+                         "— nothing to exercise")
     print(f"[2/5] snapshot OK | testing qubits: {qubits}"
           + (f" (skipping uncalibrated: {unreadable})" if unreadable else ""))
 
-    sess = Session(SimulatedBackend(dm), data_root=work / "data", device_name="selftest")
-    before = {q: dict(v) for q, v in sess.device_state().items()}
+    sess = Session(SimulatedBackend(dm), roster, data_root=work / "data", device_name="selftest")
+    before = {name: dict(v) for name, v in dm.snapshot().items()}
     failures = []
     for experiment in ("resonator_spectroscopy", "qubit_power_rabi"):
         # update="apply": this self-test exists to exercise writeback (scqo v0.6.0
         # defaults to suggest-only, which would leave the QUAM objects untouched).
-        result = sess.run(experiment, {"qubits": qubits}, update="apply", tags=["selftest"])
+        result = sess.run(experiment, {"targets": qubits}, update="apply", tags=["selftest"])
         ok = all(result["outcomes"].get(q) == "successful" for q in qubits) and not result.get("error")
         print(f"[3/5] {experiment}: {result['outcomes']}" + (f" error={result['error']}" if result.get("error") else ""))
         if not ok:
             failures.append(experiment)
 
-    after = sess.device_state()
-    moved = [q for q in qubits if after[q] != before[q]]
+    # the knobs those two experiments write live on the CHANNEL entities:
+    # readout_freq_hz on <q>_ro, pi_amp on <q>_xy — and dm.snapshot() reads
+    # them back THROUGH the views onto QUAM, so "moved" means the vendor tree.
+    after = dm.snapshot()
+    touched = [f"{q}_ro" for q in qubits] + [f"{q}_xy" for q in qubits]
+    moved = [name for name in touched if after[name] != before[name]]
     print(f"[4/5] writeback reached the real QUAM objects for: {moved or 'NONE'}")
-    if set(moved) != set(qubits):
+    if set(moved) != set(touched):
         failures.append("writeback")
 
     saved = work / "saved_state"
     machine.save(path=saved)  # explicit scratch path ONLY — never the default quam_state
     reloaded = Quam.load(str(saved))
-    dm2 = QMDeviceModel(reloaded)
+    dm2 = QMDeviceModel(reloaded, roster)
     round_trip = all(
-        abs(dm2.snapshot()[q]["readout_freq"] - after[q]["readout_freq"]) < 1e-3 for q in qubits
+        abs(dm2.snapshot()[f"{q}_ro"]["readout_freq_hz"]
+            - after[f"{q}_ro"]["readout_freq_hz"]) < 1e-3 for q in qubits
     )
     print(f"[5/5] QUAM save/reload round-trip (scratch path): {'OK' if round_trip else 'MISMATCH'}")
     if not round_trip:
