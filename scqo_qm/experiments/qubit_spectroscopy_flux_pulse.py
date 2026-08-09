@@ -21,7 +21,7 @@ as in the official 03b node).
 
 PULSE CONTRACT: this probe conforms to the ``_pulse`` name by construction — the
 flux is a z PULSE played only alongside the saturation drive
-(``scqo_qm/probes/qubit_spectroscopy_flux.py``: ``qubit.z.play(...,
+(``build_program`` below: ``qubit.z.play(...,
 duration=operation_duration)`` then ``align()`` then ``measure``), so every
 readout happens at idle flux and the neutral ``estimate()`` reduces the map
 against ONE global IQ reference. The DAC adds that pulse to the standing offset

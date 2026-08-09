@@ -52,15 +52,15 @@ def test_only_one_module_defines_the_bound():
     DAC-rail constants — same rule, applied to ``amp()``'s bound.
 
     Static (AST) rather than import-based: a copy would be caught even in a probe
-    no test imports. Scans `scqo_qm/probes/` AND the fused scqo experiments
-    dir, where new experiments live.
+    no test imports. Scans the fused scqo experiments
+    dir, where every experiment lives.
     """
     import ast
     import pathlib
 
     pkg = pathlib.Path(__file__).resolve().parents[1] / "scqo_qm"
     offenders = []
-    for folder in (pkg / "probes", pkg / "experiments"):
+    for folder in (pkg / "experiments",):
         for path in sorted(folder.glob("*.py")):
             if path.name == "_amp_limits.py":
                 continue

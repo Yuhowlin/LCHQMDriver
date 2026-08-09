@@ -39,7 +39,7 @@ QM concurrent-tone qubit spectroscopy for scqo - supplies only ``probe()``.
 
 Parameters, peak fitting and the drive_freq_hz writeback are inherited from
 ``scqo.experiments.QubitSpectroscopyOverlap``; the sequence is
-``scqo_qm/probes/qubit_spectroscopy_overlap.py`` (read its docstring - it
+the ``build_program`` below (read its docstring - it
 carries the FEM-core caveat that decides whether the tones really overlap).
 scqo sweeps ``detuning_hz``; the probe builds the same sweep on coord
 ``detuning``, which the backend's ``_to_canonical`` renames back.

@@ -33,7 +33,7 @@ QM N-swap x flux-amplitude error-amplification map for scqo — supplies ``probe
 
 Parameters, the record-only map summary and the (absent) writeback are inherited
 from ``scqo.experiments.QcNSwapAmp``. The vendor probe
-(``scqo_qm/probes/qc_N_swap_amp``) excites the pair's CONTROL qubit and plays
+(``build_program`` below) excites the pair's CONTROL qubit and plays
 every swap through ``pair.macros[swap_operation].apply(ctrl_amp=...)`` — the
 control-side flux amplitude in absolute volts, exactly scqo's ``flux_amp_v``
 axis — and keeps EVERY shot's per-qubit discriminated state. This adapter:

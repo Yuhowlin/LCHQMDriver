@@ -42,7 +42,6 @@ from scqo_qm.experiments._reset import (
 
 REPO = Path(__file__).resolve().parents[1]
 SHELLS = REPO / "scqo_qm" / "experiments"
-PROBES = REPO / "scqo_qm" / "probes"
 CARRIERS = {"qubit_relaxation", "qubit_ramsey", "qubit_echo", "qubit_power_rabi",
             "qubit_t1_ade", "qubit_t1_bayesian"}
 
@@ -135,7 +134,7 @@ def test_no_probe_hardcodes_a_reset_literal():
     Catches the next copy-paste of the old ``qubit.reset("thermal", ...)``."""
     pattern = re.compile(r"\.reset\(\s*['\"]")
     offenders = []
-    for folder in (PROBES, SHELLS):
+    for folder in (SHELLS,):
         for path in sorted(folder.glob("*.py")):
             for lineno, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):
@@ -281,7 +280,7 @@ def test_active_refuses_the_factory_default_depletion(
 def test_the_backend_refuses_before_it_probes(backend, stub_machine, roster):
     """The acquire() backstop fires check_reset_method before probe(), so a shell
     that forgot the helper still refuses. It works QM-free ONLY because the
-    backstop precedes the probes._lib import — do not reorder."""
+    backstop precedes the _lib import — do not reorder."""
     _calibrate(stub_machine)  # calibrated, so only the opt-in refusal can fire
     exp = _active_carrier("single_shot_readout", backend, roster)
 

@@ -7,7 +7,7 @@ RecordingDevice or a bare :class:`~scqo_qm.backend.qm_backend.QMDeviceModel`.
 
 The QUAM tree itself is not resolved here — every probe takes the whole
 ``backend.machine`` plus a ``BatchableList`` of QUAM qubits
-(``scqo_qm/probes/_lib.select_qubits``), because a QUA program is built out of
+(``scqo_qm/experiments/_lib.select_qubits``), because a QUA program is built out of
 the vendor's own pulse macros. What DOES need resolving is the handful of places
 where scqo hands a ROSTER name and the probe wants a VENDOR one:
 
@@ -143,7 +143,7 @@ def flux_source_name(experiment: Any, entity: str, *,
 
     ``qubit_only=True`` for probes that play a z PULSE through
     ``machine.qubits[...].z`` and therefore cannot drive a coupler at all
-    (``scqo_qm/probes/qubit_spectroscopy_flux.py``): a coupler entity is
+    (``scqo_qm/experiments/qubit_spectroscopy_flux_pulse.py``): a coupler entity is
     refused here, with the reason, rather than raising a bare KeyError inside
     the probe.
     """

@@ -9,8 +9,8 @@ readout_power_dbm/readout_freq_hz proposals are inherited from
 By the time ``probe()`` runs, the core loop has already pushed THIS point's chain
 into QUAM (and the shared acquire regenerates the QUA config every cycle), so the
 probe is literally the plain 1D resonator-spectroscopy program measured at the
-current readout amplitude (~0.5 full scale) — ``scqo_qm/probes/
-resonator_spectroscopy.build_program`` is reused UNCHANGED, including its
+current readout amplitude (~0.5 full scale) — ``scqo_qm/experiments/
+_resonator_spectroscopy.build_program`` is reused UNCHANGED, including its
 ``rr.wait(depletion_time)`` between shots. ``self.sweep_axes`` holds only the
 detuning axis during each per-point call (the run loop swaps it in).
 """
