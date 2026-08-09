@@ -201,7 +201,7 @@ def test_gef_passes_three_states_and_the_readout_shift_through(backend, roster, 
     """The three-state program is the two-state one parameterized, so what the
     shell owes the probe is exactly ``prepared_states`` and the per-run readout
     detuning."""
-    from scqo_qm.probes import readout_fidelity
+    from scqo_qm.experiments import _readout_fidelity as readout_fidelity
 
     _grant_ef_surface(backend.machine)
     seen = {}
@@ -221,7 +221,7 @@ def test_thermal_population_probe_prepares_the_ground_state_only(backend, roster
                                                                  monkeypatch):
     """One prepared state, no drive pulse: the cloud is whatever the passive wait
     leaves behind. Anything else would measure the thing it is trying to count."""
-    from scqo_qm.probes import readout_fidelity
+    from scqo_qm.experiments import _readout_fidelity as readout_fidelity
     from scqo_qm.experiments.qubit_thermal_population import QMQubitThermalPopulation
 
     seen = {}

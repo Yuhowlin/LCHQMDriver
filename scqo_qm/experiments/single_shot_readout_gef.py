@@ -50,7 +50,7 @@ class QMSingleShotReadoutGEF(SingleShotReadoutGEF):
     def probe(self) -> Any:
         from ._reset import check_reset_method
         from scqo_qm.experiments._lib import select_qubits
-        from scqo_qm.probes import readout_fidelity as fidelity_probe
+        from scqo_qm.experiments import _readout_fidelity as fidelity_probe
 
         machine = self.backend.machine  # type: ignore[attr-defined]
 

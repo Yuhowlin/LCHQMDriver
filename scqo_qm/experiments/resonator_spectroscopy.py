@@ -20,7 +20,7 @@ class QMResonatorSpectroscopy(ResonatorSpectroscopy):
 
     def probe(self) -> Any:
         from scqo_qm.experiments._lib import select_qubits
-        from scqo_qm.probes import resonator_spectroscopy as resonator_spec_probe
+        from scqo_qm.experiments import _resonator_spectroscopy as resonator_spec_probe
 
         machine = self.backend.machine  # type: ignore[attr-defined]
         qubits = select_qubits(machine, self.params.targets, multiplexed=True)

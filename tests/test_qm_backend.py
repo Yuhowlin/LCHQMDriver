@@ -593,7 +593,7 @@ def test_probe_matches_direct_build(machine, live_roster):
     from scqo_qm.experiments._lib import select_qubits
     from scqo_qm.probes import qubit_ramsey as ramsey_probe
     from scqo_qm.probes import qubit_power_rabi as power_rabi_probe
-    from scqo_qm.probes import resonator_spectroscopy as resonator_spec_probe
+    from scqo_qm.experiments import _resonator_spectroscopy as resonator_spec_probe
     from scqo_qm.experiments.qubit_ramsey import QMQubitRamsey
     from scqo_qm.experiments.qubit_power_rabi import QMQubitPowerRabi
     from scqo_qm.experiments.resonator_spectroscopy import QMResonatorSpectroscopy
@@ -847,7 +847,7 @@ def test_absolute_punchout_probe_matches_direct_build(machine, live_roster):
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
-    from scqo_qm.probes import resonator_spectroscopy as res_spec_probe
+    from scqo_qm.experiments import _resonator_spectroscopy as res_spec_probe
     from scqo_qm.experiments.resonator_spectroscopy_power_chain import (
         QMResonatorSpectroscopyPowerChain,
     )
@@ -934,7 +934,7 @@ def test_readout_fidelity_probe_state_selection_compiles(machine, live_roster):
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
-    from scqo_qm.probes import readout_fidelity as fidelity_probe
+    from scqo_qm.experiments import _readout_fidelity as fidelity_probe
 
     config = machine.generate_config()
 
