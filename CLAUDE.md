@@ -247,8 +247,14 @@ root).
   is hardware, and the chipA walkthrough that closes that gap is the REMAINING step (the QUA path has
   mileage through the `LCH_graph_*` qualibrate scripts, but the scqo shells need their own validation).
 - **Sequence preview** (`scqo run <name> --preview` → `QMBackend.preview`): dumps
-  `generate_qua_script(prog, machine.generate_config())` to `qua_script.py` — fully OFFLINE
-  (generate_config opens no socket). Six shells acquire INSIDE `probe()` and are refused by
+  `generate_qua_script(prog, machine.generate_config())` to `qua_script.py` (offline), then
+  AUTO-TRIES the gateway simulator → `simulated_waveforms.html` (plotly; the wiring
+  `network` host, a 2 s TCP probe gates the attempt, any failure degrades to script-only
+  with a PreviewWarning — a WEDGED gateway still costs the vendor request deadline).
+  Simulation runs on the gateway server, never the qubits. `--no-simulate` = guaranteed
+  offline; `--simulate-ns` widens the 20 µs default window (cap `_SIMULATE_MAX_NS`; a
+  thermal shot's leading ms-scale wait can make the default window legitimately EMPTY —
+  warned, no file). Six shells acquire INSIDE `probe()` and are refused by
   name BEFORE it runs, each declaring `probe_self_acquires = "<why>"` (backend constant
   `SELF_ACQUIRING_ATTR`; default-ALLOW polarity — contrast `supports_active_reset`'s
   default-DENY): pair_swap_chevron, qc_n_swap_amp, qubit_drag_equator, qubit_drag_alternating,

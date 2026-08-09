@@ -636,22 +636,150 @@ def test_probe_matches_direct_build(machine, live_roster):
     assert script(rs_prog) == script(rs_direct)
 
 
-def test_preview_writes_qua_script(machine, live_roster, tmp_path):
-    """QMBackend.preview: the QUA-script dump renders from the live state with
-    no QOP connection (generate_config walks the tree in memory)."""
+def _preview_ramsey(machine, live_roster):
     from customized.scqo.experiments.qubit_ramsey import QMQubitRamsey
 
     backend = QMBackend(machine, roster=live_roster)
     exp = QMQubitRamsey(backend, QMQubitRamsey.Parameters(
         targets=["q4", "q5"], num_averages=200))
     exp.sweep_axes = exp.define_sweep()  # the Session's job before the hook
+    return backend, exp
+
+
+def test_preview_writes_qua_script(machine, live_roster, tmp_path,
+                                   monkeypatch):
+    """QMBackend.preview with no_simulate: the QUA-script dump renders from
+    the live state with no QOP connection at all (generate_config walks the
+    tree in memory; the socket probe is armed to fail the test if touched)."""
+    import socket
+
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda *a, **k: pytest.fail(
+                            "no_simulate must never touch the network"))
+    backend, exp = _preview_ramsey(machine, live_roster)
     out_dir = tmp_path / "prev"
-    files = backend.preview(exp, out_dir)
+    files = backend.preview(exp, out_dir, no_simulate=True)
     assert files == [out_dir / "qua_script.py"]
     text = files[0].read_text(encoding="utf-8")
     assert text.startswith("# scqo preview: qubit_ramsey\n# backend: qm\n")
     assert "# params:" in text
     assert len(text.splitlines()) > 20  # a real program body, not just header
+
+
+class _FakeQMM:
+    """Stands in for machine.connect(): serves canned simulated samples."""
+
+    def __init__(self, samples):
+        self._samples = samples
+        self.closed = False
+        self.simulated_with = None
+
+    def simulate(self, config, prog, sim_config):
+        self.simulated_with = sim_config
+        outer = self
+
+        class _Job:
+            def get_simulated_samples(self):
+                return outer._samples
+
+        return _Job()
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_samples(signal: bool):
+    # the REAL vendor sample classes, so the plot path exercises the true API
+    import numpy as np
+    from qm.simulate._simulator_samples import (
+        SimulatorControllerSamples,
+        SimulatorSamples,
+    )
+
+    analog = np.zeros(64)
+    if signal:
+        analog[8:24] = 0.25
+    cs = SimulatorControllerSamples(
+        analog={"1-1": analog}, digital={"1-2": np.zeros(64, dtype=bool)},
+        analog_sampling_rate={"1-1": 2e9})
+    return SimulatorSamples({"con1": cs})
+
+
+def test_preview_simulate_writes_waveforms(machine, live_roster, tmp_path,
+                                           monkeypatch):
+    """The auto-simulate path: probe passes, the (stubbed) gateway serves
+    samples, the interactive waveform plot lands beside the script, and the
+    QMM connection is closed."""
+    import socket
+
+    class _Probe:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda *a, **k: _Probe())
+    backend, exp = _preview_ramsey(machine, live_roster)
+    fake = _FakeQMM(_fake_samples(signal=True))
+    monkeypatch.setattr(machine, "connect", lambda: fake, raising=False)
+    out_dir = tmp_path / "prev"
+    files = backend.preview(exp, out_dir)
+    assert [f.name for f in files] == ["qua_script.py",
+                                       "simulated_waveforms.html"]
+    assert files[1].stat().st_size > 0
+    assert fake.closed  # the gRPC channel never leaks
+    assert fake.simulated_with.duration == 20_000 // 4  # default window, cycles
+
+
+def test_preview_simulate_empty_window_warns_no_file(machine, live_roster,
+                                                     tmp_path, monkeypatch):
+    """An all-zero simulated window (thermal shot = long leading wait) warns
+    with guidance instead of shipping a blank plot."""
+    import socket
+
+    from scqo.backend import PreviewWarning
+
+    class _Probe:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda *a, **k: _Probe())
+    backend, exp = _preview_ramsey(machine, live_roster)
+    monkeypatch.setattr(machine, "connect",
+                        lambda: _FakeQMM(_fake_samples(signal=False)),
+                        raising=False)
+    with pytest.warns(PreviewWarning, match="contains no pulses"):
+        files = backend.preview(exp, tmp_path / "prev")
+    assert [f.name for f in files] == ["qua_script.py"]
+
+
+def test_preview_simulate_degrades_when_gateway_is_dead(machine, live_roster,
+                                                        tmp_path,
+                                                        monkeypatch):
+    """A dead host fails the 2 s TCP probe and the preview degrades to the
+    script with a PreviewWarning — never an error."""
+    import socket
+
+    from scqo.backend import PreviewWarning
+
+    def refuse(*args, **kwargs):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    backend, exp = _preview_ramsey(machine, live_roster)
+    with pytest.warns(PreviewWarning, match="simulated waveforms skipped"):
+        files = backend.preview(exp, tmp_path / "prev")
+    assert [f.name for f in files] == ["qua_script.py"]
+
+
+def test_preview_simulate_ns_cap_refuses(machine, live_roster, tmp_path):
+    backend, exp = _preview_ramsey(machine, live_roster)
+    with pytest.raises(ValueError, match="simulate_ns"):
+        backend.preview(exp, tmp_path / "prev", simulate_ns=10_000_000)
+    with pytest.raises(ValueError, match="contradict"):
+        backend.preview(exp, tmp_path / "prev", simulate_ns=1000,
+                        no_simulate=True)
+    assert not (tmp_path / "prev").exists()
 
 
 @pytest.mark.parametrize("gate", ["x180", "x90"])

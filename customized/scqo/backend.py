@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import xarray as xr
-from scqo.backend import Backend
+from scqo.backend import Backend, PreviewWarning
 from scqo.catalog import OP_KNOBS, derived_op
 from scqo.device import (
     ComponentInfo,
@@ -65,6 +65,16 @@ if TYPE_CHECKING:
 #: contrast ACTIVE_RESET_ATTR's default-DENY). Census in tests/test_preview.py
 #: keeps the declarations exactly in step with the shells that really acquire.
 SELF_ACQUIRING_ATTR = "probe_self_acquires"
+
+#: preview's simulated-waveform window (ns) when --simulate-ns is not given.
+#: Small on purpose: the LF-FEM samples at 2 GS/s, so the html grows 2k
+#: points per ns per port. 20 us shows an active-reset shot from t=0; a
+#: thermal shot starts with a ms-scale wait, which preview warns about.
+_SIMULATE_DEFAULT_NS = 20_000
+#: hard ceiling for --simulate-ns (400k samples/port at 2 GS/s) — refused by
+#: name above it, because the html and the gateway simulation both scale
+#: linearly with the window.
+_SIMULATE_MAX_NS = 200_000
 
 #: MW-FEM full-scale grid (dBm): -11..+16 in 3 dB steps (power_tools validates the
 #: same values; its docstring's "[-41,10]" range is stale).
@@ -1049,8 +1059,10 @@ class QMBackend(Backend):
             raw = raw.rename({"state": "population"})
         return self._to_canonical(raw, experiment)
 
-    def preview(self, experiment: "Experiment", out_dir: "Path") -> "list[Path]":
-        """Dump the QUA script to ``out_dir`` — fully offline, nothing saved.
+    def preview(self, experiment: "Experiment", out_dir: "Path", *,
+                simulate_ns: "int | None" = None,
+                no_simulate: bool = False) -> "list[Path]":
+        """Dump the QUA script, then TRY the gateway simulator — never the qubits.
 
         The scqo ``Backend.preview`` hook (``Session.preview`` /
         ``scqo run <name> --preview``): the same build slice as ``acquire()``
@@ -1061,10 +1073,32 @@ class QMBackend(Backend):
         whose probe() itself ACQUIRES (declared via ``probe_self_acquires``,
         see :data:`SELF_ACQUIRING_ATTR`) are refused by name BEFORE probe()
         can touch the instrument.
+
+        The waveform view is attempted AUTOMATICALLY: the OPX1000 gateway's
+        simulator (the wiring's ``network`` host) compiles the program and
+        returns the analog output samples, saved as an interactive
+        ``simulated_waveforms.html`` beside the script. Simulation runs on
+        the gateway server — nothing plays on the physical outputs. Any
+        gateway problem (host down, wedged, refused) degrades to the script
+        with a :class:`~scqo.backend.PreviewWarning`, gated by a 2 s TCP
+        probe first so a dead host cannot stall the preview.
+        ``no_simulate=True`` (CLI ``--no-simulate``) skips the attempt —
+        guaranteed fully offline; ``simulate_ns`` (CLI ``--simulate-ns``)
+        widens the window, capped at :data:`_SIMULATE_MAX_NS`.
         """
         from customized.scqo.experiments._reset import check_reset_method
 
         name = getattr(type(experiment), "name", type(experiment).__name__)
+        if simulate_ns is not None:
+            if no_simulate:
+                raise ValueError(
+                    "simulate_ns and no_simulate contradict each other")
+            if not 0 < simulate_ns <= _SIMULATE_MAX_NS:
+                raise ValueError(
+                    f"simulate_ns={simulate_ns} is refused: the window must "
+                    f"be in (0, {_SIMULATE_MAX_NS}] ns — the simulated html "
+                    f"holds 2000 samples per ns per port and the gateway "
+                    f"simulation time scales with it")
         reason = getattr(type(experiment), SELF_ACQUIRING_ATTR, None)
         if reason:
             raise ValueError(
@@ -1083,7 +1117,8 @@ class QMBackend(Backend):
 
         from qm import generate_qua_script
 
-        script = generate_qua_script(prog, self._machine.generate_config())
+        config = self._machine.generate_config()
+        script = generate_qua_script(prog, config)
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / "qua_script.py"
         header = (f"# scqo preview: {name}\n"
@@ -1091,7 +1126,111 @@ class QMBackend(Backend):
                   f"# generated: {datetime.now(timezone.utc).isoformat()}\n"
                   f"# params: {experiment.params.model_dump_json()}\n\n")
         path.write_text(header + script, encoding="utf-8")
-        return [path]
+        files = [path]
+
+        if not no_simulate:
+            window_ns = simulate_ns or _SIMULATE_DEFAULT_NS
+            try:
+                waveforms = self._simulated_waveforms(prog, config, out_dir,
+                                                      window_ns)
+            except Exception as err:  # degrade, never fail the preview
+                warnings.warn(PreviewWarning(
+                    f"simulated waveforms skipped "
+                    f"({type(err).__name__}: {err}) — qua_script.py is "
+                    f"complete; pass --no-simulate to silence this, or check "
+                    f"the gateway if it should have answered"))
+            else:
+                if waveforms is not None:
+                    files.append(waveforms)
+        return files
+
+    def _simulated_waveforms(self, prog: Any, config: dict,
+                             out_dir: "Path", window_ns: int) -> "Path | None":
+        """Compile+simulate ``window_ns`` of output on the gateway and write
+        the interactive plot. Raises on any gateway problem (the caller
+        degrades to script-only); returns None when the window contains no
+        pulses (warned, no file). The 2 s TCP probe fails a dead host fast —
+        a WEDGED gateway (accepts TCP, stalls on requests) still costs the
+        vendor's own request deadline before the degrade path fires."""
+        import socket
+
+        net = getattr(self._machine, "network", None) or {}
+        get = net.get if hasattr(net, "get") else lambda k, d=None: getattr(
+            net, k, d)
+        host, port = get("host"), get("port")
+        if host:  # fail a dead host in 2 s, not a gRPC timeout
+            socket.create_connection((str(host), int(port or 80)),
+                                     timeout=2.0).close()
+
+        from qm import SimulationConfig
+
+        qmm = self._machine.connect()
+        try:
+            job = qmm.simulate(config, prog,
+                               SimulationConfig(duration=max(
+                                   1, window_ns // 4)))  # duration: 4 ns cycles
+            samples = job.get_simulated_samples()
+        finally:
+            # qm-qua 1.2.6's QuantumMachinesManager has no close(); newer
+            # versions (and the test double) do — call it when present, and
+            # never mask the simulate outcome with a close() failure.
+            close = getattr(qmm, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
+
+        import numpy as np
+        import plotly.graph_objects as go
+
+        def port_label(port_key: str, kind: str) -> str:
+            parts = str(port_key).split("-")  # "<fem>-<out>[-<upconv>]"
+            if len(parts) >= 2:
+                label = f"FEM{parts[0]}-{kind}O{parts[1]}"
+                return label + (f"-UP{parts[2]}" if len(parts) == 3 else "")
+            return str(port_key)
+
+        fig = go.Figure()
+        many = len(samples) > 1
+        for controller, cs in samples.items():
+            prefix = f"{controller} " if many else ""
+            for port_key, values in cs.analog.items():
+                arr = np.asarray(values)
+                if not np.any(arr):
+                    continue
+                rate = cs.analog_sampling_rate[str(port_key)]
+                t = np.arange(len(arr)) / rate * 1e9
+                label = prefix + port_label(port_key, "A")
+                if np.iscomplexobj(arr):  # MW-FEM: I/Q pair
+                    fig.add_trace(go.Scatter(x=t, y=arr.real,
+                                             name=f"{label} I"))
+                    fig.add_trace(go.Scatter(x=t, y=arr.imag,
+                                             name=f"{label} Q"))
+                else:
+                    fig.add_trace(go.Scatter(x=t, y=arr, name=label))
+            for port_key, values in cs.digital.items():
+                arr = np.asarray(values)
+                if not np.any(arr):
+                    continue
+                t = np.arange(len(arr), dtype=float)  # digital: 1 GS/s = 1 ns steps
+                fig.add_trace(go.Scatter(
+                    x=t, y=arr.astype(int),
+                    name=prefix + port_label(port_key, "D"),
+                    line={"shape": "hv"}))
+        if not fig.data:
+            warnings.warn(PreviewWarning(
+                f"the simulated window (first {window_ns} ns) contains no "
+                f"pulses — a thermal-reset shot starts with a long wait; "
+                f"try a larger --simulate-ns or reset_method='active'"))
+            return None
+        fig.update_layout(
+            title=(f"simulated gateway output — first {window_ns} ns "
+                   f"(latencies included; sample step from each port's rate)"),
+            xaxis_title="Time [ns]", yaxis_title="Output")
+        waveforms = out_dir / "simulated_waveforms.html"
+        fig.write_html(str(waveforms))
+        return waveforms
 
     @staticmethod
     def _to_canonical(raw: xr.Dataset, experiment: "Experiment") -> xr.Dataset:
