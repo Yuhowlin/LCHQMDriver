@@ -70,25 +70,16 @@ FOUR THINGS ARE LOAD-BEARING here, each a SILENT failure if dropped:
    never reads — honouring both would silently drop the one the caller typed.
    Refusing here means the override context manager never sees the combination.
 
-WHERE THE EVIDENCE CAME FROM. The QUA path has lab mileage through the
+WHERE THE EVIDENCE CAME FROM. The QUA path itself has lab mileage through the
 qualibrate graph scripts (``calibrations/offline_graph/LCH_graph_*.py`` run
-``reset_type="active"`` routinely), and the scqo SHELLS are hardware-proven
-too — VALIDATED 2026-08-09/10: dozens of successful active-reset ramseys on
-chipA (2026-07-26 .. 2026-08-08, run index) and 5Q4C q1 run
-``20260809-231319`` (active ramsey, successful fit, 48 s wall for 401x400
-shots vs ~6 min thermal).
-
-THE TRAP THAT WAS MISREAD AS THIS FILE'S BUG (5Q4C, 2026-08-04 .. 2026-08-10):
-a degraded QPX1000-cluster state stalls EVERY feedback program — active
-reset's conditional pi makes every carrier one — mid-run at exactly
-``num_averages/2`` shots, deterministic per config, across experiments
-(ramsey, relaxation), sweep shapes and feedback rates, while the THERMAL twins
-of the same sweeps pass and an identical-firmware healthy cluster (chipA's)
-passes the same shapes. That is a gateway/controller STATE defect, not a
-program defect: ``_lib.acquire``'s no-progress watchdog halts the job (freeing
-the QOP) and raises a named error carrying the cluster clear/restart playbook.
-``QMBackend.acquire`` re-checks through this same function before ``probe()``
-— the backstop that fires even for a shell that forgot to call the helper.
+``reset_type="active"`` routinely); what is missing is evidence for the scqo
+SHELLS specifically, and this driver has been bitten before by a readout-frame
+convention that compiled clean and was wrong on the instrument. Offline tests
+prove the policy and that the program builds; the feedback loop itself is
+hardware, and the chipA walkthrough that closes that gap is the REMAINING step
+(update this note to the validation date once it is done). ``QMBackend.acquire``
+re-checks through this same function before ``probe()`` — the backstop that fires
+even for a shell that forgot to call the helper.
 """
 
 from __future__ import annotations

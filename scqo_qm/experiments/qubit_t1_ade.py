@@ -267,15 +267,19 @@ def acquire(
     """Execute and hand-fetch the heterogeneous ADE streams into the canonical
     dataset (gamma/sigma converted 1/us -> 1/s, dt in ns, per-shot states over
     (block_idx, delay_idx, shot_idx), timestamps -> elapsed block_time_s)."""
-    from scqo_qm.experiments._lib import qm_job, wait_all_streams
+    from qualang_tools.multi_user import qm_session
+
+    qmm = machine.connect()
+    config = config if config is not None else machine.generate_config()
 
     qubit_names = list(np.atleast_1d(sweep_axes["qubit"].values))
     num_qubits = len(qubit_names)
     n_blocks = sweep_axes["block_idx"].values.size
 
-    with qm_job(machine, prog, timeout=timeout, config=config) as job:
+    with qm_session(qmm, config, timeout=timeout) as qm:
+        job = qm.execute(prog)
         results = job.result_handles
-        wait_all_streams(machine, results)
+        results.wait_for_all_values()
 
         gamma, sigma, dt_cycles, shots, stamps = [], [], [], [], []
         for i in range(num_qubits):
