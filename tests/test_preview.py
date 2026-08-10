@@ -25,6 +25,7 @@ from scqo.experiments import catalog, get
 #: Dataset — the ONLY legitimate carriers of the opt-out attribute
 SELF_ACQUIRING = {
     "pair_swap_chevron",
+    "qc_n_stark_amp",
     "qc_n_swap_amp",
     "qubit_drag_equator",
     "qubit_drag_alternating",
