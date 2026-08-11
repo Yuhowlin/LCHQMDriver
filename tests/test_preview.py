@@ -67,3 +67,56 @@ def test_refusal_fires_before_probe_and_creates_nothing(backend, roster,
                        match="qubit_drag_alternating cannot be previewed"):
         backend.preview(exp, out_dir)
     assert not out_dir.exists()
+
+
+# ---------------------------------------------------------------- single-target
+# preview gate: a self-acquiring shell that exposes a preview_program() hook may
+# be previewed with EXACTLY ONE target (the single program it would build), and
+# is refused otherwise. The build itself needs the live machine (see
+# test_qm_backend.py); the gate logic is exercised here QUAM-free.
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def _fake_experiment(targets, *, self_acquiring: bool, hook: bool):
+    attrs: dict = {}
+    if self_acquiring:
+        attrs[SELF_ACQUIRING_ATTR] = "it acquires in a Python loop"
+    if hook:
+        attrs["preview_program"] = lambda self: "PROG"
+    cls = type("Fake", (), attrs)
+    obj = cls()
+    obj.params = SimpleNamespace(targets=list(targets))
+    return obj
+
+
+def test_preview_refusal_gate():
+    from scqo_qm.backend.qm_backend import _preview_refusal
+
+    # a normal build-and-return shell is never refused
+    assert _preview_refusal(
+        _fake_experiment(["p1"], self_acquiring=False, hook=False)) is None
+    # self-acquiring + hook + exactly one target -> previewable (the new case)
+    assert _preview_refusal(
+        _fake_experiment(["p1"], self_acquiring=True, hook=True)) is None
+    # self-acquiring + hook + more than one target -> refused, single-target msg
+    multi = _preview_refusal(
+        _fake_experiment(["p1", "p2"], self_acquiring=True, hook=True))
+    assert multi is not None and "exactly one --target" in multi
+    # self-acquiring, no hook -> refused with the original reason
+    nohook = _preview_refusal(
+        _fake_experiment(["p1"], self_acquiring=True, hook=False))
+    assert nohook is not None and "inside a real run" in nohook
+
+
+def test_multi_target_self_acquiring_preview_refuses(backend, roster, tmp_path):
+    """qc_n_stark_amp HAS a preview_program hook, so with >1 target it is refused
+    by the single-target gate (before any program is built — QUAM-free)."""
+    from scqo_qm.experiments.qc_n_stark_amp import QMQcNStarkAmp
+
+    exp = make_experiment(QMQcNStarkAmp, backend, roster,
+                          QMQcNStarkAmp.Parameters(targets=["q1_q2", "q2_q3"]))
+    out_dir = tmp_path / "prev"
+    with pytest.raises(ValueError, match="select exactly one --target"):
+        backend.preview(exp, out_dir)
+    assert not out_dir.exists()

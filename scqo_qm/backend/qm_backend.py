@@ -66,6 +66,32 @@ if TYPE_CHECKING:
 #: keeps the declarations exactly in step with the shells that really acquire.
 SELF_ACQUIRING_ATTR = "probe_self_acquires"
 
+
+def _preview_refusal(experiment) -> "str | None":
+    """Why a QM preview is refused, or ``None`` when it may proceed.
+
+    A self-acquiring shell (``SELF_ACQUIRING_ATTR`` set) builds ONE program per
+    target inside ``probe()``, so it has no standalone program to render — UNLESS
+    it exposes a ``preview_program()`` hook AND exactly one target is selected, in
+    which case that single program is built (no acquire). Anything else that
+    self-acquires is refused; a normal build-and-return shell is never refused.
+    Returns the refusal DETAIL (the backend prepends the experiment name + the
+    shell's own reason); ``None`` means previewable.
+    """
+    if not getattr(type(experiment), SELF_ACQUIRING_ATTR, None):
+        return None
+    builder = getattr(experiment, "preview_program", None)
+    targets = list(getattr(getattr(experiment, "params", None), "targets", None) or [])
+    if builder is not None and len(targets) == 1:
+        return None
+    if builder is not None:
+        return (f"select exactly one --target — a self-acquiring shell previews "
+                f"the single program it would build for that target, and you "
+                f"selected {len(targets)}")
+    return ("its QUA program only exists inside a real run; run it for real or "
+            "preview a different experiment")
+
+
 #: preview's simulated-waveform window (ns) when --simulate-ns is not given.
 #: Small on purpose: the LF-FEM samples at 2 GS/s, so the html grows 2k
 #: points per ns per port. 20 us shows an active-reset shot from t=0; a
@@ -1072,7 +1098,9 @@ class QMBackend(Backend):
         no socket (``generate_config`` walks the QUAM tree in memory). Shells
         whose probe() itself ACQUIRES (declared via ``probe_self_acquires``,
         see :data:`SELF_ACQUIRING_ATTR`) are refused by name BEFORE probe()
-        can touch the instrument.
+        can touch the instrument — UNLESS the shell exposes a ``preview_program``
+        hook and exactly one target is selected, in which case that single
+        program is built (no acquire) and rendered.
 
         The waveform view is attempted AUTOMATICALLY: the OPX1000 gateway's
         simulator (the wiring's ``network`` host) compiles the program and
@@ -1100,19 +1128,21 @@ class QMBackend(Backend):
                     f"holds 2000 samples per ns per port and the gateway "
                     f"simulation time scales with it")
         reason = getattr(type(experiment), SELF_ACQUIRING_ATTR, None)
-        if reason:
+        refusal = _preview_refusal(experiment)
+        if refusal is not None:
             raise ValueError(
-                f"{name} cannot be previewed on the QM backend: {reason} — "
-                f"its QUA program only exists inside a real run; run it for "
-                f"real or preview a different experiment")
+                f"{name} cannot be previewed on the QM backend: {reason} — {refusal}")
         check_reset_method(experiment)  # same backstop as acquire()
         with self._thermalization_override(experiment):
-            res = experiment.probe()
-        if isinstance(res, xr.Dataset):  # the census missed one — refuse loud
-            raise ValueError(
-                f"{name}.probe() returned a ready Dataset — it acquires "
-                f"during probe(); declare {SELF_ACQUIRING_ATTR} on the shell")
-        prog = res[0]  # covers both the 2-tuple and 3-tuple probe shapes
+            if reason:  # single-target self-acquiring (gate passed): build the one program
+                prog = experiment.preview_program()
+            else:
+                res = experiment.probe()
+                if isinstance(res, xr.Dataset):  # the census missed one — refuse loud
+                    raise ValueError(
+                        f"{name}.probe() returned a ready Dataset — it acquires "
+                        f"during probe(); declare {SELF_ACQUIRING_ATTR} on the shell")
+                prog = res[0]  # covers both the 2-tuple and 3-tuple probe shapes
         from datetime import datetime, timezone
 
         from qm import generate_qua_script

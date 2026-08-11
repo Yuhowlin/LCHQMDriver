@@ -202,10 +202,14 @@ def build_program(
                     ctrl.xy.update_frequency(stark_if)
 
                     # Circuit body: N swaps on the pair, each bare (fixed baked amplitude),
-                    # each followed by the swept off-resonant stark tone on the control xy.
+                    # each followed SEQUENTIALLY by the swept off-resonant stark tone on the
+                    # control xy. The swap and the stark do NOT overlap: apply() ends with the
+                    # pair's align() (FluxTunableTransmonPair.align aligns every channel of both
+                    # qubits, INCLUDING control.xy), so the control's xy timeline is synced to the
+                    # end of the swap before the stark plays.
                     # Dynamic loop bound on r -> N=0 skips the body entirely (baseline).
-                    # `gap_cycles` idles the pair's flux lines between operations so each
-                    # swap's flux pulse can settle before the next one fires.
+                    # `gap_cycles` idles the pair's flux lines between operations so the pulses
+                    # settle before the next swap fires.
                     with for_(rr, 0, rr < r, rr + 1):
                         swap_pair.macros[swap_operation].apply()
                         ctrl.xy.play(stark_operation, amplitude_scale=q_a)
@@ -287,14 +291,20 @@ class QMQcNStarkAmp(QcNStarkAmp):
     probe_self_acquires = ("it executes one program per swap pair in a "
                            "Python loop inside probe()")
 
-    def probe(self) -> Any:
+    def _build_pair_program(self, pair):
+        """Build ONE target pair's QUA program — the build half of ``probe()``,
+        no acquire. Shared by ``probe()`` (looped over targets + acquired) and
+        ``preview_program()`` (a single pair, dumped for ``--preview``).
+
+        The role/reset validation reads ``self.params.targets`` (it refuses a
+        role that maps onto different vendor sides across the run), so it is the
+        same whichever pair is passed — cheap to re-run per call for a handful
+        of targets, and it keeps ``preview_program`` self-contained."""
         from ._reset import check_reset_method
         from ._vendor import role_side, vendor_pair
 
-        machine = self.backend.machine  # type: ignore[attr-defined]
         # Resolved BEFORE any QUA is built, so a roster/params mismatch refuses
-        # without costing instrument time. `high` fixes the member ordering.
-        high_side = role_side(self, "high", field="targets")
+        # without costing instrument time.
         drive = role_side(self, self.params.drive_side, field="drive_side")
         flux = role_side(self, self.params.flux_side, field="flux_side",
                          needs_flux=True)
@@ -311,29 +321,41 @@ class QMQcNStarkAmp(QcNStarkAmp):
         # shell does not opt into active reset — default DENY — so 'active'
         # refuses by name until it has hardware evidence for this sequence).
         reset = check_reset_method(self)
+        qp = vendor_pair(self, pair)
+        return build_program(
+            self.backend.machine, [qp.qubit_control, qp.qubit_target], qp,
+            swap_operation=self.params.swap_operation,
+            stark_operation=self.params.stark_operation,
+            stark_detuning_hz=self.params.stark_detuning_hz,
+            rounds_array=np.asarray(self.sweep_axes["swap_count"]).astype(int),
+            stark_amps=np.asarray(self.sweep_axes["stark_amp"], dtype=float),
+            num_shots=int(self.params.num_averages),
+            reset_type=reset,
+            use_state_discrimination=True,
+            operation_gap_ns=int(self.params.operation_gap_ns),
+        )
 
-        amps = np.asarray(self.sweep_axes["stark_amp"], dtype=float)
-        counts = np.asarray(self.sweep_axes["swap_count"]).astype(int)
+    def preview_program(self) -> Any:
+        """The single-target ``--preview`` build (QMBackend's single-pair preview
+        path). The backend gates on exactly one target before calling this, so a
+        self-acquiring shell can still be inspected without touching the QPU."""
+        prog, _sweep_axes = self._build_pair_program(self.params.targets[0])
+        return prog
+
+    def probe(self) -> Any:
+        from ._vendor import role_side
+
+        machine = self.backend.machine  # type: ignore[attr-defined]
+        # `high` fixes the member ordering for the readout-schema reshape;
+        # resolved once (the per-pair build re-checks drive/flux and reset).
+        high_side = role_side(self, "high", field="targets")
         shots = int(self.params.num_averages)
-        gap_ns = int(self.params.operation_gap_ns)
 
         # One program per pair (the probe takes a single swap pair); the two
         # measured qubits are exactly the pair's members, control first.
         per_pair = []
         for pair in self.params.targets:
-            qp = vendor_pair(self, pair)
-            prog, sweep_axes = build_program(
-                machine, [qp.qubit_control, qp.qubit_target], qp,
-                swap_operation=self.params.swap_operation,
-                stark_operation=self.params.stark_operation,
-                stark_detuning_hz=self.params.stark_detuning_hz,
-                rounds_array=counts,
-                stark_amps=amps,
-                num_shots=shots,
-                reset_type=reset,
-                use_state_discrimination=True,
-                operation_gap_ns=gap_ns,
-            )
+            prog, sweep_axes = self._build_pair_program(pair)
             raw = acquire(machine, prog, sweep_axes,
                           num_shots=shots,
                           timeout=self.backend._timeout)
