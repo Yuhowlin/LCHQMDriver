@@ -673,6 +673,57 @@ def test_stark_amp_single_target_preview_builds(machine, live_roster, tmp_path,
     assert len(text.splitlines()) > 20  # a real program body, not just header
 
 
+def test_swap_amp_single_target_preview_builds(machine, live_roster, tmp_path,
+                                               monkeypatch):
+    """qc_n_swap_amp (self-acquiring) is previewable with EXACTLY ONE --target:
+    the single program is built (no acquire, no network). Skips when the live
+    state has no pair with an iswap-style swap macro (control-z flux pulse)."""
+    import socket
+
+    from conftest import make_experiment
+    from scqo_qm.experiments.qc_n_swap_amp import QMQcNSwapAmp
+
+    choice = None
+    for _key, qp in machine.qubit_pairs.items():
+        ctrl = qp.qubit_control
+        target = f"{ctrl.name}_{qp.qubit_target.name}"
+        ent = live_roster.entities.get(target)
+        if ent is None:
+            continue
+        side = next((r for r in ("high", "low") if ctrl.name in ent.roles.get(r, ())),
+                    None)
+        if side is None or (ctrl.name, "flux") not in live_roster.defaults:
+            continue
+        swap_op = next((n for n, m in (qp.macros or {}).items()
+                        if isinstance(getattr(m, "flux_pulse", None), str)
+                        and getattr(m, "flux_pulse") in ctrl.z.operations), None)
+        if swap_op is not None:
+            choice = (target, side, swap_op)
+            break
+    if choice is None:
+        pytest.skip("no live pair with an iswap-style swap macro")
+    target, side, swap_op = choice
+
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda *a, **k: pytest.fail(
+                            "no_simulate must never touch the network"))
+    backend = QMBackend(machine, roster=live_roster)
+    exp = make_experiment(
+        QMQcNSwapAmp, backend, live_roster,
+        QMQcNSwapAmp.Parameters(targets=[target], swap_operation=swap_op,
+                                drive_side=side, flux_side=side,
+                                min_flux_amp_v=0.0, max_flux_amp_v=0.05,
+                                num_amp_points=5, swap_counts=[0, 1, 2],
+                                num_averages=10))
+    exp.sweep_axes = exp.define_sweep()
+    out_dir = tmp_path / "prev"
+    files = backend.preview(exp, out_dir, no_simulate=True)
+    assert files == [out_dir / "qua_script.py"]
+    text = files[0].read_text(encoding="utf-8")
+    assert text.startswith("# scqo preview: qc_n_swap_amp\n# backend: qm\n")
+    assert len(text.splitlines()) > 20  # a real program body, not just header
+
+
 class _FakeQMM:
     """Stands in for machine.connect(): serves canned simulated samples."""
 
