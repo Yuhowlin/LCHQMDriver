@@ -208,13 +208,13 @@ def build_program(
                     # qubits, INCLUDING control.xy), so the control's xy timeline is synced to the
                     # end of the swap before the stark plays.
                     # Dynamic loop bound on r -> N=0 skips the body entirely (baseline).
-                    # `gap_cycles` idles the pair's flux lines between operations so the pulses
-                    # settle before the next swap fires.
+                    # `gap_cycles` idles the pair BETWEEN the swap and the stark tone, so the
+                    # swap's flux pulse settles before the stark tone plays.
                     with for_(rr, 0, rr < r, rr + 1):
                         swap_pair.macros[swap_operation].apply()
-                        ctrl.xy.play(stark_operation, amplitude_scale=q_a)
                         if gap_cycles > 0:
                             swap_pair.wait(gap_cycles)
+                        ctrl.xy.play(stark_operation, amplitude_scale=q_a)
                         align()
 
                     # Restore the resonant IF before readout.
