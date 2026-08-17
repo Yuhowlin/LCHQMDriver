@@ -5,12 +5,20 @@ the amplitude maximising single-shot fidelity is found downstream.
 
 QM readout-power (fidelity vs readout amplitude) for scqo - supplies only ``probe()``.
 
-Parameters, the per-amplitude two-Gaussian-mixture fit and the ``readout_amp``
-writeback are inherited from ``scqo.experiments.ReadoutPower``. PER-SHOT
-contract: every readout shot's I/Q point is recorded individually — the probe's
-streams are ``buffer(2).buffer(len(amps)).buffer(num_shots)`` with NO
-``.average()``. The swept ``amp_prefactor`` values are applied as QUA
-``amplitude_scale`` on the readout pulse (prefactor x current readout_amp).
+Parameters, the analysis and the ``readout_amp`` writeback are inherited from
+``scqo.experiments.ReadoutPower``. TWO READOUT MODES, one program shape,
+differing only in the stream terminal:
+
+* ``readout_mode="shot"`` — every readout shot's I/Q point is recorded
+  individually: ``buffer(2).buffer(len(amps)).buffer(num_shots)``, NO
+  ``.average()``, and a ``shot_idx`` sweep axis.
+* ``readout_mode="average"`` — the same shots are averaged on the FPGA:
+  ``buffer(2).buffer(len(amps)).average()``, and ``shot_idx`` leaves the sweep
+  axes entirely (scqo's contract accepts that form as the alt set). The shot
+  loop still runs ``num_shots`` times; only its terminal changes.
+
+The swept ``amp_prefactor`` values are applied as QUA ``amplitude_scale`` on the
+readout pulse (prefactor x current readout_amp).
 
 AXIS-ORDER NOTE: the probe's QUA loops nest shot (outer) over amplitude over
 prepared-state (inner), so the raw per-qubit array is shaped
@@ -49,12 +57,15 @@ def build_program(
     num_shots: int,
     reset_type: str,
     simulate: bool = False,
+    average_shots: bool = False,
 ):
     """Build the readout-power QUA program. Returns (program, sweep_axes).
 
-    `amps` is the readout-amplitude prefactor sweep; `num_shots` single shots are taken per
+    `amps` is the readout-amplitude prefactor sweep; `num_shots` measurements are taken per
     (amplitude, prepared state) point (0 = ground, 1 = x180-excited). `qubits` is a
-    BatchableList (see `_lib.select_qubits`).
+    BatchableList (see `_lib.select_qubits`). With `average_shots` the FPGA
+    averages those repetitions instead of streaming each one, and the returned
+    sweep_axes carry no `shot_idx`.
     """
     check_amp_scale_window(amps, name=", ".join(qubits.get_names()))
     num_qubits = len(qubits)
@@ -62,10 +73,14 @@ def build_program(
 
     sweep_axes = {
         "qubit": xr.DataArray(qubits.get_names()),
-        "shot_idx": xr.DataArray(np.arange(1, num_shots + 1), attrs={"long_name": "number of shots"}),
         "amp_prefactor": xr.DataArray(amps, attrs={"long_name": "readout amplitude", "units": ""}),
         "prepared_state": xr.DataArray(prepared_states, attrs={"long_name": "prepared qubit state", "units": ""}),
     }
+    if not average_shots:  # shot-major nesting: the outer loop is the shot loop
+        sweep_axes = {"qubit": sweep_axes["qubit"],
+                      "shot_idx": xr.DataArray(np.arange(1, num_shots + 1),
+                                               attrs={"long_name": "number of shots"}),
+                      **{k: v for k, v in sweep_axes.items() if k != "qubit"}}
     with program() as prog:
         I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
         a = declare(fixed)
@@ -108,8 +123,13 @@ def build_program(
         with stream_processing():
             n_st.save("n")
             for i in range(num_qubits):
-                I_st[i].buffer(len(prepared_states)).buffer(len(amps)).buffer(num_shots).save(f"I{i + 1}")
-                Q_st[i].buffer(len(prepared_states)).buffer(len(amps)).buffer(num_shots).save(f"Q{i + 1}")
+                # the ONE difference between the modes: what closes the shot loop
+                i_st = I_st[i].buffer(len(prepared_states)).buffer(len(amps))
+                q_st = Q_st[i].buffer(len(prepared_states)).buffer(len(amps))
+                i_st = i_st.average() if average_shots else i_st.buffer(num_shots)
+                q_st = q_st.average() if average_shots else q_st.buffer(num_shots)
+                i_st.save(f"I{i + 1}")
+                q_st.save(f"Q{i + 1}")
 
     return prog, sweep_axes
 
@@ -135,7 +155,7 @@ from scqo.experiments import ReadoutPower
 
 @register
 class QMReadoutPower(ReadoutPower):
-    """Build a multiplexed per-shot readout-amplitude-scan QUA program on the QM OPX."""
+    """Build a multiplexed readout-amplitude-scan QUA program on the QM OPX."""
 
     def probe(self) -> Any:
         from ._reset import check_reset_method
@@ -150,4 +170,5 @@ class QMReadoutPower(ReadoutPower):
             amps=self.sweep_axes["amp_prefactor"],
             num_shots=self.params.num_shots,
             reset_type=check_reset_method(self),
+            average_shots=self.params.readout_mode == "average",
         )

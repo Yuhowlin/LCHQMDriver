@@ -1021,6 +1021,38 @@ def test_readout_fidelity_probe_state_selection_compiles(machine, live_roster):
     assert list(ground_axes["prepared_state"].values) == [0]
 
 
+def test_readout_sweeps_build_in_both_readout_modes(machine, live_roster):
+    """readout_power / readout_frequency realize BOTH readout modes off one
+    program: the shot loop is identical and only the stream terminal differs
+    (`.buffer(num_shots)` vs `.average()`), so average mode must compile against
+    the live config and must drop `shot_idx` from the sweep axes — scqo's
+    contract accepts the averaged form only without that axis."""
+    from qm import generate_qua_script
+
+    from scqo_qm.experiments._lib import select_qubits
+    from scqo_qm.experiments import readout_power as power_probe
+    from scqo_qm.experiments import readout_frequency as freq_probe
+
+    config = machine.generate_config()
+    qubits = select_qubits(machine, ["q1"], multiplexed=True)
+    common = dict(num_shots=10, reset_type="thermal")
+    cases = [
+        (power_probe, {"amps": np.linspace(0.5, 1.0, 3)}),
+        (freq_probe, {"dfs": np.linspace(-1e6, 1e6, 3)}),
+    ]
+    for module, sweep in cases:
+        shot_prog, shot_axes = module.build_program(machine, qubits, **sweep, **common)
+        avg_prog, avg_axes = module.build_program(
+            machine, qubits, **sweep, average_shots=True, **common)
+
+        assert "shot_idx" in shot_axes and "shot_idx" not in avg_axes
+        shot_script = generate_qua_script(shot_prog, config)
+        avg_script = generate_qua_script(avg_prog, config)
+        assert "average()" in avg_script and "average()" not in shot_script
+        # same measurement sequence either way — only the terminal moved
+        assert avg_script.count("measure(") == shot_script.count("measure(")
+
+
 # ------------------------------------------- the pair swap maps, live QUAM tree
 
 def _live_pair(machine) -> tuple[str, object]:

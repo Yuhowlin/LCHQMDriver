@@ -6,11 +6,19 @@ fidelity estimator scans for the optimal readout frequency.
 
 QM readout-frequency (fidelity vs readout detuning) for scqo - supplies only ``probe()``.
 
-Parameters, the per-frequency two-Gaussian-mixture fit and the ``readout_freq_hz``
-writeback are inherited from ``scqo.experiments.ReadoutFrequency``. PER-SHOT
-contract: every readout shot's I/Q point is recorded individually — the probe's
-streams are ``buffer(2).buffer(len(dfs)).buffer(num_shots)`` with NO
-``.average()``. scqo sweeps ``detuning_hz``; the QM builder applies each value
+Parameters, the analysis and the ``readout_freq_hz`` writeback are inherited from
+``scqo.experiments.ReadoutFrequency``. TWO READOUT MODES, one program shape,
+differing only in the stream terminal:
+
+* ``readout_mode="shot"`` — every readout shot's I/Q point is recorded
+  individually: ``buffer(2).buffer(len(dfs)).buffer(num_shots)``, NO
+  ``.average()``, and a ``shot_idx`` sweep axis.
+* ``readout_mode="average"`` — the same shots are averaged on the FPGA:
+  ``buffer(2).buffer(len(dfs)).average()``, and ``shot_idx`` leaves the sweep
+  axes entirely (scqo's contract accepts that form as the alt set). The shot
+  loop still runs ``num_shots`` times; only its terminal changes.
+
+scqo sweeps ``detuning_hz``; the QM builder applies each value
 relative to the resonator's current IF (``df + intermediate_frequency`` — same
 convention as the resonator_spectroscopy wrapper) but names its axis
 ``frequency``, which we re-key below.
@@ -53,12 +61,15 @@ def build_program(
     num_shots: int,
     reset_type: str,
     simulate: bool = False,
+    average_shots: bool = False,
 ):
     """Build the readout-frequency QUA program. Returns (program, sweep_axes).
 
     `dfs` is the readout-frequency detuning sweep in Hz (relative to the current
     resonator IF); `qubits` is a BatchableList (see `_lib.select_qubits`).
-    Always acquires I/Q single shots (no state-discrimination branch).
+    Always acquires analog I/Q (no state-discrimination branch). With
+    `average_shots` the FPGA averages the `num_shots` repetitions instead of
+    streaming each one, and the returned sweep_axes carry no `shot_idx`.
     """
     num_qubits = len(qubits)
     n_runs = num_shots
@@ -66,10 +77,14 @@ def build_program(
     prepared_states = [0, 1]
     sweep_axes = {
         "qubit": xr.DataArray(qubits.get_names()),
-        "shot_idx": xr.DataArray(np.arange(1, n_runs + 1), attrs={"long_name": "number of shots"}),
         "frequency": xr.DataArray(dfs, attrs={"long_name": "readout frequency", "units": "Hz"}),
         "prepared_state": xr.DataArray(prepared_states, attrs={"long_name": "prepared qubit state", "units": ""}),
     }
+    if not average_shots:  # shot-major nesting: the outer loop is the shot loop
+        sweep_axes = {"qubit": sweep_axes["qubit"],
+                      "shot_idx": xr.DataArray(np.arange(1, n_runs + 1),
+                                               attrs={"long_name": "number of shots"}),
+                      **{k: v for k, v in sweep_axes.items() if k != "qubit"}}
     with program() as prog:
         I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
         df = declare(int)
@@ -113,8 +128,13 @@ def build_program(
         with stream_processing():
             n_st.save("n")
             for i in range(num_qubits):
-                I_st[i].buffer(len(prepared_states)).buffer(len(dfs)).buffer(n_runs).save(f"I{i + 1}")
-                Q_st[i].buffer(len(prepared_states)).buffer(len(dfs)).buffer(n_runs).save(f"Q{i + 1}")
+                # the ONE difference between the modes: what closes the shot loop
+                i_st = I_st[i].buffer(len(prepared_states)).buffer(len(dfs))
+                q_st = Q_st[i].buffer(len(prepared_states)).buffer(len(dfs))
+                i_st = i_st.average() if average_shots else i_st.buffer(n_runs)
+                q_st = q_st.average() if average_shots else q_st.buffer(n_runs)
+                i_st.save(f"I{i + 1}")
+                q_st.save(f"Q{i + 1}")
 
     return prog, sweep_axes
 
@@ -140,7 +160,7 @@ from scqo.experiments import ReadoutFrequency
 
 @register
 class QMReadoutFrequency(ReadoutFrequency):
-    """Build a multiplexed per-shot readout-frequency-scan QUA program on the QM OPX."""
+    """Build a multiplexed readout-frequency-scan QUA program on the QM OPX."""
 
     def probe(self) -> Any:
         from ._reset import check_reset_method
@@ -155,14 +175,15 @@ class QMReadoutFrequency(ReadoutFrequency):
             dfs=self.sweep_axes["detuning_hz"],
             num_shots=self.params.num_shots,
             reset_type=check_reset_method(self),
+            average_shots=self.params.readout_mode == "average",
         )
-        # Canonical names in RAW nesting order (shot outer, detuning, prepared
-        # state inner — see module docstring); the DataArray values are reused
-        # (the probe's "frequency" values already are the detunings in Hz).
-        sweep_axes = {
-            "qubit": axes["qubit"],
-            "shot_idx": axes["shot_idx"],
-            "detuning_hz": axes["frequency"],
-            "prepared_state": axes["prepared_state"],
-        }
+        # Canonical names in RAW nesting order (shot outer where it exists, then
+        # detuning, prepared state inner — see module docstring); the DataArray
+        # values are reused (the probe's "frequency" values already are the
+        # detunings in Hz).
+        sweep_axes = {"qubit": axes["qubit"]}
+        if "shot_idx" in axes:
+            sweep_axes["shot_idx"] = axes["shot_idx"]
+        sweep_axes["detuning_hz"] = axes["frequency"]
+        sweep_axes["prepared_state"] = axes["prepared_state"]
         return prog, sweep_axes
