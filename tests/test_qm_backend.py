@@ -976,7 +976,7 @@ def test_power_amp_probe_builds_with_new_loop_order(machine, live_roster):
             ln for ln in generate_qua_script(prog, config).splitlines() if "generated at" not in ln
         )
 
-    base = dict(targets=["q4"], num_power_points=5, num_freq_points=3, num_averages=10)
+    base = dict(targets=["q4"], num_power_points=5, num_readout_freq_points=3, num_averages=10)
     default = script(base)
     overridden = script({**base, "readout_depletion_ns": 25000.0})
     assert default != overridden  # the relaxation override reaches the QUA program
@@ -1311,8 +1311,8 @@ def test_spectroscopy_cryoscope_probe_builds_against_the_live_quam(machine, live
     exp = QMQubitSpectroscopyCryoscope(
         backend,
         QMQubitSpectroscopyCryoscope.Parameters(
-            targets=[name], start_detuning_hz=-150e6, end_detuning_hz=0.0,
-            num_freq_points=11, drive_len_ns=400, min_wait_ns=16, max_wait_ns=2000,
+            targets=[name], start_drive_detuning_hz=-150e6, end_drive_detuning_hz=0.0,
+            num_drive_freq_points=11, drive_len_ns=400, min_wait_ns=16, max_wait_ns=2000,
             num_wait_points=8, num_averages=10, flux_pulse_amp_v=0.02,
         ),
     )
