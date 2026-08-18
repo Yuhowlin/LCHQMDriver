@@ -48,9 +48,9 @@ def _env(tmp_path: Path) -> dict:
         encoding="utf-8",
     )
     # ...and a datasheet: the simulated vendor seeds readout_freq_hz from the
-    # resonator's f_r_hz and drive_freq_hz from the qubit's f_01_hz
+    # resonator's f_dress0_hz and drive_freq_hz from the qubit's f_01_hz
     (data_root / "simdev" / "design.toml").write_text(
-        "schema = 1\n[q0]\nf_01_hz = 3.8e9\n[q0_res]\nf_r_hz = 5.95e9\n",
+        "schema = 1\n[q0]\nf_01_hz = 3.8e9\n[q0_res]\nf_dress0_hz = 5.95e9\n",
         encoding="utf-8",
     )
     # Always pin parameters_file (empty): without it the CLI falls back to the
