@@ -71,7 +71,7 @@ def _build(machine, live_roster, name, **params):
     backend = QMBackend(machine, roster=live_roster)
     cls = get(name)
     kwargs = {k: v for k, v in
-              dict(num_points=5, num_averages=10, **params).items()
+              dict(num_freq_points=5, num_averages=10, **params).items()
               if k in cls.Parameters.model_fields}
     exp = cls(backend, cls.Parameters(targets=[TARGET], **kwargs))
     exp.device = recording_device(backend, live_roster)
@@ -144,7 +144,7 @@ def test_targets_with_different_readout_windows_are_refused(machine, live_roster
     if len(others) < 2:
         pytest.skip("needs two qubits on the live tree")
 
-    exp = cls(backend, cls.Parameters(targets=others, num_points=5, num_averages=10))
+    exp = cls(backend, cls.Parameters(targets=others, num_freq_points=5, num_averages=10))
     exp.device = recording_device(backend, live_roster)
     exp.sweep_axes = exp.define_sweep()
     view = exp.device.channel(others[1], "readout")

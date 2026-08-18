@@ -1311,7 +1311,7 @@ def test_spectroscopy_cryoscope_probe_builds_against_the_live_quam(machine, live
     exp = QMQubitSpectroscopyCryoscope(
         backend,
         QMQubitSpectroscopyCryoscope.Parameters(
-            targets=[name], min_detuning_hz=-150e6, max_detuning_hz=0.0,
+            targets=[name], start_detuning_hz=-150e6, end_detuning_hz=0.0,
             num_freq_points=11, drive_len_ns=400, min_wait_ns=16, max_wait_ns=2000,
             num_wait_points=8, num_averages=10, flux_pulse_amp_v=0.02,
         ),
