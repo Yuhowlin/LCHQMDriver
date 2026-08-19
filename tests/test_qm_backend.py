@@ -1295,11 +1295,15 @@ def test_ramsey_cryoscope_probe_builds_against_the_baked_config(machine, live_ro
 def test_spectroscopy_cryoscope_probe_builds_against_the_live_quam(machine, live_roster):
     """The long-time (spectroscopy) cryoscope needs no baking, so it returns the
     ordinary (program, sweep_axes) pair and the backend's shared fetch runs it.
-    Pin the canonical axes and that the parked spectroscopy program COMPILES
+    Pin the canonical axes, the RUN-SCOPED drive op's lifecycle (probe() files it,
+    so machine.generate_config() — which the shared acquire calls AFTER probe() —
+    carries it at exactly drive_len_ns, and the teardown removes it again so it can
+    never reach machine.save()), and that the parked spectroscopy program COMPILES
     against the live QUAM (the pure validate_inputs test cannot)."""
     from qm import generate_qua_script
 
     from scqo_qm.experiments.qubit_spectroscopy_cryoscope import (
+        DRIVE_OP,
         QMQubitSpectroscopyCryoscope,
     )
 
@@ -1316,8 +1320,24 @@ def test_spectroscopy_cryoscope_probe_builds_against_the_live_quam(machine, live
             num_wait_points=8, num_averages=10, flux_pulse_amp_v=0.02,
         ),
     )
+    xy = machine.qubits[name].xy
+    assert DRIVE_OP not in xy.operations  # nothing persisted from an earlier run
     exp.sweep_axes = exp.define_sweep()
-    prog, sweep_axes = exp.probe()
+    try:
+        prog, sweep_axes = exp.probe()
+
+        # the run-scoped tone: on the line at exactly drive_len_ns and weaker than
+        # the calibrated x180 (it spreads the same rotation area over 400 ns, not
+        # 16), and rendered into the config generated after probe() returns.
+        assert xy.operations[DRIVE_OP].length == 400
+        assert 0 < xy.operations[DRIVE_OP].amplitude < xy.operations["x180"].amplitude
+        config = machine.generate_config()
+        pulse_id = config["elements"][xy.name]["operations"][DRIVE_OP]
+        assert config["pulses"][pulse_id]["length"] == 400
+    finally:
+        exp._drop_drive_op()  # what run()'s finally does
+    assert DRIVE_OP not in xy.operations
+    assert DRIVE_OP not in machine.generate_config()["elements"][xy.name]["operations"]
 
     # canonical axes in raw nesting order, with their units — no baking, so the
     # adapter returns (program, sweep_axes) rather than self-acquiring
@@ -1331,7 +1351,9 @@ def test_spectroscopy_cryoscope_probe_builds_against_the_live_quam(machine, live
     assert sweep_axes["detuning_hz"].values[-1] == pytest.approx(0.0)
     assert 2 <= len(sweep_axes["wait_time_ns"]) <= 8  # log axis dedups on the 4 ns grid
 
-    assert generate_qua_script(prog, machine.generate_config())
+    # against the config captured while the op was installed — the one the real
+    # acquire path uses.
+    assert generate_qua_script(prog, config)
 
 
 def test_apply_exponential_filter_extends_a_live_quam_port(machine):

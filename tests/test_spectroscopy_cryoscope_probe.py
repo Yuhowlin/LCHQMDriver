@@ -5,10 +5,11 @@ flux pulse and drives at each wait-time into it. Two pure helpers are checked he
 (no QOP, no config): ``validate_inputs`` (more than one target, a missing flux
 line, and a parked flux whose ``idle + excursion`` clips the port or needs an
 ``amplitude_scale`` QUA cannot express — a legal call returns the ``const``
-reference amplitude the volts->scale conversion divides by) and
-``resolve_drive_scale`` (the area-preserving spectroscopy-drive amplitude: a
-longer pulse is a proportionally weaker one, and a scale QUA's ``amp()`` cannot
-express is refused by name).
+reference amplitude the volts->scale conversion divides by) and the RUN-SCOPED
+spectroscopy tone: ``drive_amp_for_area`` (the area-preserving absolute amplitude —
+a longer pulse is a proportionally weaker one), ``make_drive_pulse`` (the three
+envelopes and what each one's average/peak ratio is), and ``check_drive_amp``
+(a tone louder than the loudest already on the xy line refused by name).
 """
 
 from __future__ import annotations
@@ -19,7 +20,12 @@ import numpy as np
 import pytest
 
 from scqo_qm.experiments.qubit_spectroscopy_cryoscope import (
-    resolve_drive_scale,
+    DRIVE_OP,
+    _mean_per_amplitude,
+    check_drive_amp,
+    drive_amp_for_area,
+    drop_drive_op,
+    make_drive_pulse,
     validate_inputs,
 )
 
@@ -81,46 +87,100 @@ def test_amplitude_scale_out_of_range_refused():
         validate_inputs(_Qubits([_qubit(const_amp=0.2)]), flux_amp_v=0.5, flux_point="joint")
 
 
-def test_drive_scale_holds_the_x180_rotation_area():
-    # sample-less stubs fall back to the lab envelopes (cosine x180 -> 0.5,
-    # square drive -> 1.0): x180 rotation area = 0.5 * 0.2 * 16; saturation amp
-    # 0.4 over 400 ns -> 1.6 / 160 = 0.01.
+def test_drive_amp_holds_the_x180_rotation_area():
+    """The absolute amplitude is the x180 rotation area spread over the tone: a
+    longer pulse is a proportionally weaker one, and drive_amp_factor multiplies."""
+    x180_area = 0.5 * 0.2 * 16  # cosine average/peak x amplitude x length
+    amp = drive_amp_for_area(x180_area, 1.0, 400)  # square envelope
+    assert amp == pytest.approx(x180_area / 400)
+    assert drive_amp_for_area(x180_area, 1.0, 800) == pytest.approx(amp / 2)
+    assert drive_amp_for_area(x180_area, 1.0, 400, 1.5) == pytest.approx(amp * 1.5)
+    # a half-area envelope needs twice the peak to deliver the same rotation
+    assert drive_amp_for_area(x180_area, 0.5, 400) == pytest.approx(amp * 2)
+
+
+def test_drive_amp_reproduces_the_stretched_saturation_amplitude():
+    """`square` is the same PHYSICS as the retired stretched-`saturation` path (the
+    stored amplitude times the area-preserving scale), now expressed absolutely."""
+    x180_area, sat_amp, length = 0.5 * 0.2 * 16, 0.4, 400
+    legacy_scale = x180_area / (sat_amp * length)  # what resolve_drive_scale returned
+    assert drive_amp_for_area(x180_area, 1.0, length) == pytest.approx(
+        sat_amp * legacy_scale)
+
+
+@pytest.mark.parametrize("shape, expected_ratio", [
+    ("square", 1.0),        # constant waveform
+    ("cosine", 0.5),        # raised cosine (Hann), mean over a whole period
+    ("gaussian", 0.4622),   # sigma = length/4, subtracted
+])
+def test_make_drive_pulse_envelopes(shape, expected_ratio):
+    """Each shape renders at the requested length, and its mean envelope per unit
+    NOMINAL amplitude is the factor the amplitude arithmetic divides by."""
+    pulse = make_drive_pulse(shape, 400)
+    assert pulse.length == 400
+    assert _mean_per_amplitude(pulse, default=-1.0) == pytest.approx(
+        expected_ratio, abs=0.005)
+
+
+def test_subtracted_gaussian_is_measured_against_its_NOMINAL_amplitude():
+    """The regression this guards: a subtracted gaussian's rendered PEAK is only
+    amplitude x (1 - exp(-2)) at sigma = length/4, but ``amplitude`` is what gets
+    stored — measuring the envelope against the peak (``_area_ratio``) instead of
+    the nominal amplitude leaves the tone 13.5% under a pi pulse, silently costing
+    contrast. Pin that the built pulse delivers the requested area exactly."""
+    pulse = make_drive_pulse("gaussian", 400, 0.25)
+    samples = np.real(np.asarray(pulse.waveform_function()))
+    assert samples.max() == pytest.approx(1 - np.exp(-2.0), abs=0.01)  # < nominal 1.0
+
+    x180_area = 0.5 * 0.2 * 16
+    ratio = _mean_per_amplitude(pulse, default=-1.0)
+    pulse.amplitude = drive_amp_for_area(x180_area, ratio, 400)
+    rendered = np.real(np.asarray(pulse.waveform_function()))
+    assert rendered.sum() == pytest.approx(x180_area, rel=1e-3)
+
+
+@pytest.mark.parametrize("shape", ["square", "cosine", "gaussian"])
+def test_every_shape_delivers_the_same_rotation_area(shape):
+    """Shape changes the LINESHAPE, never the rotation: all three tones integrate
+    to the same x180 area at the same length, so switching drive_shape cannot
+    silently turn the spectroscopy pulse into a sub- or over-rotation."""
+    x180_area = 0.5 * 0.2 * 16
+    pulse = make_drive_pulse(shape, 400)
+    pulse.amplitude = drive_amp_for_area(
+        x180_area, _mean_per_amplitude(pulse, default=-1.0), 400)
+    rendered = np.real(np.asarray(pulse.waveform_function()))
+    area = float(rendered.sum()) if rendered.ndim else float(rendered) * 400
+    assert area == pytest.approx(x180_area, rel=1e-3)
+
+
+def test_make_drive_pulse_gaussian_sigma_frac_narrows_the_envelope():
+    """A narrower sigma packs less area under the same nominal amplitude, so the
+    tone needs a proportionally larger amplitude to stay a pi pulse."""
+    wide = _mean_per_amplitude(make_drive_pulse("gaussian", 400, 0.25), default=-1.0)
+    narrow = _mean_per_amplitude(make_drive_pulse("gaussian", 400, 0.10), default=-1.0)
+    assert narrow < wide
+
+
+def test_unknown_drive_shape_refused_by_name():
+    with pytest.raises(ValueError, match="drive_shape"):
+        make_drive_pulse("lorentzian", 400)
+
+
+def test_drive_amp_above_the_loudest_stored_tone_refused_by_name():
+    """Clipping is silent on the QM simulator, so a tone louder than anything the
+    xy line already stores is refused before instrument time — naming the knobs."""
+    xy = _xy(x180_amp=0.2, sat_amp=0.4)
+    check_drive_amp(0.4, xy, name="q0 drive")  # exactly the ceiling is fine
+    with pytest.raises(ValueError, match="drive_amp_factor"):
+        check_drive_amp(0.5, xy, name="q0 drive")
+
+
+def test_drop_drive_op_is_idempotent_and_survives_a_missing_line():
+    """run()'s finally must never raise: dropping a tone that was never installed,
+    or one on a qubit with no xy line, is a no-op."""
     q = _qubit()
-    scale = resolve_drive_scale(q, operation="saturation", operation_len_ns=400)
-    assert scale == pytest.approx(0.5 * 0.2 * 16 / (0.4 * 400))
-    # a longer pulse is a proportionally weaker one (area held constant).
-    longer = resolve_drive_scale(q, operation="saturation", operation_len_ns=800)
-    assert longer == pytest.approx(scale / 2)
-    # operation_amp is a plain extra multiplier on top.
-    boosted = resolve_drive_scale(q, operation="saturation", operation_len_ns=400,
-                                  operation_amp=1.5)
-    assert boosted == pytest.approx(scale * 1.5)
-
-
-def test_drive_scale_samples_the_real_envelopes():
-    """Ops that can render their waveform are weighted by the SAMPLED envelope
-    (average/peak of the I quadrature), not the fallback: a cosine-envelope DRAG
-    x180 delivers half its peak x length — miss that factor and the played tone is
-    an exact 2*pi pulse whose spectroscopy response splits into two lobes (seen on
-    hardware, 2026-08-03)."""
-    t = np.arange(16.0)
-    cos_env = 0.2 * (1 - np.cos(2 * np.pi * t / 16)) / 2  # DragCosine I quadrature
-    x180 = SimpleNamespace(
-        amplitude=0.2, length=16.0,
-        # complex I + iQ, pinning the real-part-only reduction (Q integrates ~0)
-        waveform_function=lambda: cos_env + 0.05j * np.gradient(cos_env))
-    sat = SimpleNamespace(amplitude=0.4, length=1000.0,
-                          waveform_function=lambda: 0.4)  # SquarePulse: a scalar
-    q = SimpleNamespace(name="q0", xy=SimpleNamespace(
-        operations={"x180": x180, "saturation": sat}))
-    scale = resolve_drive_scale(q, operation="saturation", operation_len_ns=400)
-    # cosine mean/peak over a whole period is exactly 0.5; square is 1.0
-    assert scale == pytest.approx(0.5 * 0.2 * 16 / (0.4 * 400))
-
-
-def test_drive_scale_out_of_range_refused_by_name():
-    # a pathological config (tiny stored saturation amplitude) drives the
-    # area-preserving scale past QUA's +/-2 amp() range -> refused before building.
-    q = _qubit(xy=_xy(x180_amp=0.5, x180_len=16, sat_amp=0.002))
-    with pytest.raises(ValueError, match="amplitude_scale"):
-        resolve_drive_scale(q, operation="saturation", operation_len_ns=16)
+    q.xy.operations[DRIVE_OP] = object()
+    drop_drive_op(q)
+    assert DRIVE_OP not in q.xy.operations
+    drop_drive_op(q)  # already gone
+    drop_drive_op(SimpleNamespace(name="q0", xy=None))
