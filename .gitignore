@@ -19,3 +19,4 @@ temp/
 # calibration_utils/ by sync_official.py and ARE tracked in git, so they are
 # intentionally NOT ignored here. Do not edit the vendored files in place;
 # update upstream and re-run `python sync_official.py`.
+**/quam_state_6q
