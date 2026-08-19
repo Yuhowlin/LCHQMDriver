@@ -128,6 +128,8 @@ def build_program(
                     for i_q, qubit in multiplexed_qubits.items():
                         qubit.reset(reset_type, simulate, log_callable=log)
                     align()
+                    for i_q, qubit in multiplexed_qubits.items():
+                        reset_frame(qubit.xy.name)
 
                     for i_q, qubit in multiplexed_qubits.items():
                         q_name = qubit_names[i_q]
@@ -164,6 +166,8 @@ def build_program(
                             for i_q, qubit in multiplexed_qubits.items():
                                 qubit.reset(reset_type, simulate, log_callable=log)
                             align()
+                            for i_q, qubit in multiplexed_qubits.items():
+                                reset_frame(qubit.xy.name)
 
                             # Phase 1: Init State (all qubits simultaneously, noise_mode qubits skipped)
                             for i_q, qubit in multiplexed_qubits.items():

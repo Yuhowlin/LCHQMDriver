@@ -24,6 +24,8 @@ from scqo.experiments import catalog, get
 #: the shells whose probe() executes on the instrument and returns a ready
 #: Dataset — the ONLY legitimate carriers of the opt-out attribute
 SELF_ACQUIRING = {
+    "broadband_qubit_spectroscopy",
+    "broadband_resonator_spectroscopy",
     "pair_swap_chevron",
     "qc_n_stark_amp",
     "qc_n_swap_amp",
