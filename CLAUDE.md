@@ -37,7 +37,7 @@ scqo_qm/
     __init__.py          # one import line per experiment module so @register runs (manual;
                          #   tests/test_experiment_registration.py enforces completeness both
                          #   directions) + the qm-logging stderr re-home (see Operational Notes)
-    <name>.py            # ONE FILE PER EXPERIMENT (all 35): merged physics docstring, a
+    <name>.py            # ONE FILE PER EXPERIMENT (all 36): merged physics docstring, a
                          #   module-level build_program(...) (+ own acquire() where the streams
                          #   are heterogeneous), and the registered QM<Name>(<Name>) class whose
                          #   probe() maps self.params -> the local builder

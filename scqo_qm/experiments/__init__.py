@@ -35,6 +35,7 @@ from . import qubit_drag_alternating  # noqa: F401  (import side effect: @regist
 from . import qubit_drag_equator  # noqa: F401  (import side effect: @register)
 from . import qubit_echo  # noqa: F401  (import side effect: @register)
 from . import qubit_echo_flux_pulse  # noqa: F401  (import side effect: @register)
+from . import qubit_parametric_drive  # noqa: F401  (import side effect: @register)
 from . import qubit_parity_switch_continuous  # noqa: F401  (import side effect: @register)
 from . import qubit_parity_switch_discrete  # noqa: F401  (import side effect: @register)
 from . import qubit_pi_pulse_error  # noqa: F401  (import side effect: @register)
