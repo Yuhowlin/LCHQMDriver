@@ -30,13 +30,37 @@ def play_init_state(qubit, state_str: str):
         play("-x90", qubit.xy.name)
     elif st in ("-i", "-y"):
         play("x90", qubit.xy.name)
+    else:
+        raise ValueError(
+            f"Unsupported initial state '{state_str}'. "
+            "Supported states are: '0', 'g', '1', 'e', '+', '+x', '-', '-x', '+i', '+y', '-i', '-y'."
+        )
 
 
 def get_op_cycles(qubit, op_name: str = "x180", default_cycles: int = 10) -> int:
     """Get QUAM operation duration in QUA clock cycles (1 cycle = 4 ns)."""
+    gt = str(op_name).strip().lower()
+    if gt in ("i", "id", "x", "x180"):
+        gt = "x180"
+    elif gt in ("x90", "x/2"):
+        gt = "x90"
+    elif gt in ("y", "y180"):
+        gt = "y180"
+    elif gt in ("y90", "y/2"):
+        gt = "y90"
+    elif gt in ("-x90", "-x/2"):
+        gt = "-x90"
+    elif gt in ("-y90", "-y/2"):
+        gt = "-y90"
+    else:
+        raise ValueError(
+            f"Unsupported operation '{op_name}'. "
+            "Supported operations are: 'i', 'id', 'x', 'x180', 'x90', 'x/2', 'y', 'y180', 'y90', 'y/2', '-x90', '-y90'."
+        )
+
     try:
-        if hasattr(qubit, "xy") and hasattr(qubit.xy, "operations") and op_name in qubit.xy.operations:
-            length_ns = qubit.xy.operations[op_name].length
+        if hasattr(qubit, "xy") and hasattr(qubit.xy, "operations") and gt in qubit.xy.operations:
+            length_ns = qubit.xy.operations[gt].length
             return max(1, int(length_ns) // 4)
     except Exception:
         pass
@@ -45,28 +69,42 @@ def get_op_cycles(qubit, op_name: str = "x180", default_cycles: int = 10) -> int
 
 def play_target_gate(qubit, gate_str: str):
     """Play target gate pulse once."""
-    gt = str(gate_str).strip().upper()
-    if gt in ("I", "ID"):
+    gt = str(gate_str).strip().lower()
+    if gt in ("i", "id"):
         cycles = get_op_cycles(qubit, "x180")
         wait(cycles, qubit.xy.name)
-    elif gt in ("X", "X180"):
+    elif gt in ("x", "x180"):
         play("x180", qubit.xy.name)
-    elif gt in ("X90", "X/2"):
+    elif gt in ("x90", "x/2"):
         play("x90", qubit.xy.name)
-    elif gt in ("Y", "Y180"):
+    elif gt in ("y", "y180"):
         play("y180", qubit.xy.name)
-    elif gt in ("Y90", "Y/2"):
+    elif gt in ("y90", "y/2"):
         play("y90", qubit.xy.name)
+    elif gt in ("-x90", "-x/2"):
+        play("-x90", qubit.xy.name)
+    elif gt in ("-y90", "-y/2"):
+        play("-y90", qubit.xy.name)
+    else:
+        raise ValueError(
+            f"Unsupported target gate '{gate_str}'. "
+            "Supported gates are: 'i', 'id', 'x', 'x180', 'x90', 'x/2', 'y', 'y180', 'y90', 'y/2', '-x90', '-y90'."
+        )
 
 
 def play_basis_rotation(qubit, basis_str: str):
     """Play basis measurement rotation pulse."""
-    if basis_str == "z":
+    b = str(basis_str).strip().lower()
+    if b == "z":
         pass
-    elif basis_str == "x":
+    elif b == "x":
         play("-y90", qubit.xy.name)
-    elif basis_str == "y":
+    elif b == "y":
         play("x90", qubit.xy.name)
+    else:
+        raise ValueError(
+            f"Unsupported measurement basis '{basis_str}'. Supported bases are: 'z', 'x', 'y'."
+        )
 
 
 def build_program(
@@ -77,6 +115,7 @@ def build_program(
     gate_counts: List[int],
     num_shots: int,
     num_training_shots: int = 2000,
+    interleave_noise: bool = True,
     symmetrized_readout: bool = True,
     reset_type: str = "thermal",
     simulate: bool = False,
@@ -85,10 +124,15 @@ def build_program(
     """Build the Qubit Tomography QUA program.
 
     A qubit whose config sets ``noise_mode: True`` is a spectator noise
-    source: it still plays its target gates in phase 2 (that is the point —
-    driving it injects crosstalk while a neighbour runs tomography) but skips
-    init, basis rotation and measurement; its streams carry dummy zeros so
-    the dataset shape stays uniform and the estimator marks it success=0.
+    source: it plays its target gates in phase 2 (driving it injects
+    crosstalk while a neighbour runs tomography) but skips init, basis
+    rotation and measurement; its streams carry dummy zeros so the dataset
+    shape stays uniform and the estimator marks it success=0.
+
+    When ``interleave_noise: True`` and noise qubits are present, the sequence
+    interleaves ``noise_condition: ["off", "on"]`` per shot. Under ``off``,
+    the spectator executes an idle wait matching its gate length, guaranteeing
+    drift-free common-mode baseline comparisons.
     """
     num_qubits = len(qubits)
     qubit_names = qubits.get_names()
@@ -96,8 +140,19 @@ def build_program(
     sym_names = ["reg", "inv"] if symmetrized_readout else ["reg"]
     sym_indices = list(range(len(sym_names)))
 
+    has_noise = any(
+        bool(cfg.get("noise_mode", False))
+        for cfg in qubit_configs.values()
+    )
+    if has_noise and interleave_noise:
+        noise_conditions = ["off", "on"]
+    else:
+        noise_conditions = ["off"]
+    nc_indices = list(range(len(noise_conditions)))
+
     sweep_axes = {
-        "qubit": xr.DataArray(qubit_names),
+        "target": xr.DataArray(qubit_names),
+        "noise_condition": xr.DataArray(noise_conditions),
         "basis": xr.DataArray(bases),
         "sym": xr.DataArray(sym_names),
         "gate_count": xr.DataArray(gate_counts),
@@ -110,6 +165,7 @@ def build_program(
         I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
         I_tr, I_tr_st, Q_tr, Q_tr_st, n_tr, n_tr_st = machine.declare_qua_variables()
 
+        nc_idx = declare(int)
         b_idx = declare(int)
         s_idx = declare(int)
         gc_idx = declare(int)
@@ -156,71 +212,82 @@ def build_program(
                             save(Q_tr[i_q], Q_tr_st[i_q])
                     align()
 
-            # 2. Tomography Shots
+            # 2. Tomography Shots (Interleaved Noise and Baseline)
             with for_(n, 0, n < num_shots, n + 1):
                 save(n, n_st)
-                with for_each_(b_idx, [0, 1, 2]):
-                    with for_each_(s_idx, sym_indices):
-                        with for_each_(gc_idx, gate_counts):
-                            # Reset
-                            for i_q, qubit in multiplexed_qubits.items():
-                                qubit.reset(reset_type, simulate, log_callable=log)
-                            align()
-                            for i_q, qubit in multiplexed_qubits.items():
-                                reset_frame(qubit.xy.name)
+                with for_each_(nc_idx, nc_indices):
+                    with for_each_(b_idx, [0, 1, 2]):
+                        with for_each_(s_idx, sym_indices):
+                            with for_each_(gc_idx, gate_counts):
+                                # Reset
+                                for i_q, qubit in multiplexed_qubits.items():
+                                    qubit.reset(reset_type, simulate, log_callable=log)
+                                align()
+                                for i_q, qubit in multiplexed_qubits.items():
+                                    reset_frame(qubit.xy.name)
 
-                            # Phase 1: Init State (all qubits simultaneously, noise_mode qubits skipped)
-                            for i_q, qubit in multiplexed_qubits.items():
-                                q_name = qubit_names[i_q]
-                                q_cfg = qubit_configs.get(q_name, {})
-                                noise_mode = bool(q_cfg.get("noise_mode", False))
-                                if not noise_mode:
-                                    init_st = q_cfg.get("init_state", "0")
-                                    play_init_state(qubit, init_st)
-                            align()
-
-                            # Phase 2: Target Gate (all qubits per rep — including
-                            # noise_mode qubits, which are driven as noise sources)
-                            with for_(rep, 0, rep < gc_idx, rep + 1):
+                                # Phase 1: Init State (all qubits simultaneously, noise_mode qubits skipped)
                                 for i_q, qubit in multiplexed_qubits.items():
                                     q_name = qubit_names[i_q]
                                     q_cfg = qubit_configs.get(q_name, {})
-                                    tgt_gt = q_cfg.get("target_gate", "X180")
-                                    play_target_gate(qubit, tgt_gt)
-                            align()
+                                    noise_mode = bool(q_cfg.get("noise_mode", False))
+                                    if not noise_mode:
+                                        init_st = q_cfg.get("init_state", "0")
+                                        play_init_state(qubit, init_st)
+                                align()
 
-                            # Phase 3: Basis Rotation (all qubits simultaneously)
-                            for i_q, qubit in multiplexed_qubits.items():
-                                q_name = qubit_names[i_q]
-                                q_cfg = qubit_configs.get(q_name, {})
-                                noise_mode = bool(q_cfg.get("noise_mode", False))
-                                if not noise_mode:
-                                    with if_(b_idx == 0):
-                                        play_basis_rotation(qubit, "z")
-                                    with elif_(b_idx == 1):
-                                        play_basis_rotation(qubit, "x")
-                                    with else_():
-                                        play_basis_rotation(qubit, "y")
-                                    with if_(s_idx == 1):
-                                        play("x180", qubit.xy.name)
-                            align()
+                                # Phase 2: Target Gate (with symmetric idle wait for noise OFF)
+                                with for_(rep, 0, rep < gc_idx, rep + 1):
+                                    for i_q, qubit in multiplexed_qubits.items():
+                                        q_name = qubit_names[i_q]
+                                        q_cfg = qubit_configs.get(q_name, {})
+                                        tgt_gt = q_cfg.get("target_gate", "X180")
+                                        noise_mode = bool(q_cfg.get("noise_mode", False))
+                                        if not noise_mode:
+                                            play_target_gate(qubit, tgt_gt)
+                                        else:
+                                            if len(noise_conditions) > 1:
+                                                with if_(nc_idx == 0):
+                                                    cycles = get_op_cycles(qubit, tgt_gt)
+                                                    wait(cycles, qubit.xy.name)
+                                                with else_():
+                                                    play_target_gate(qubit, tgt_gt)
+                                            else:
+                                                play_target_gate(qubit, tgt_gt)
+                                    align()
 
-                            # Measurement (noise_mode qubits save dummy zeros)
-                            for i_q, qubit in multiplexed_qubits.items():
-                                q_name = qubit_names[i_q]
-                                q_cfg = qubit_configs.get(q_name, {})
-                                noise_mode = bool(q_cfg.get("noise_mode", False))
+                                # Phase 3: Basis Rotation (all qubits simultaneously)
+                                for i_q, qubit in multiplexed_qubits.items():
+                                    q_name = qubit_names[i_q]
+                                    q_cfg = qubit_configs.get(q_name, {})
+                                    noise_mode = bool(q_cfg.get("noise_mode", False))
+                                    if not noise_mode:
+                                        with if_(b_idx == 0):
+                                            play_basis_rotation(qubit, "z")
+                                        with elif_(b_idx == 1):
+                                            play_basis_rotation(qubit, "x")
+                                        with else_():
+                                            play_basis_rotation(qubit, "y")
+                                        with if_(s_idx == 1):
+                                            play("x180", qubit.xy.name)
+                                align()
 
-                                if not noise_mode:
-                                    qubit.resonator.measure("readout", qua_vars=(I[i_q], Q[i_q]))
-                                    save(I[i_q], I_st[i_q])
-                                    save(Q[i_q], Q_st[i_q])
-                                else:
-                                    assign(I[i_q], 0.0)
-                                    assign(Q[i_q], 0.0)
-                                    save(I[i_q], I_st[i_q])
-                                    save(Q[i_q], Q_st[i_q])
-                            align()
+                                # Measurement (noise_mode qubits save dummy zeros)
+                                for i_q, qubit in multiplexed_qubits.items():
+                                    q_name = qubit_names[i_q]
+                                    q_cfg = qubit_configs.get(q_name, {})
+                                    noise_mode = bool(q_cfg.get("noise_mode", False))
+
+                                    if not noise_mode:
+                                        qubit.resonator.measure("readout", qua_vars=(I[i_q], Q[i_q]))
+                                        save(I[i_q], I_st[i_q])
+                                        save(Q[i_q], Q_st[i_q])
+                                    else:
+                                        assign(I[i_q], 0.0)
+                                        assign(Q[i_q], 0.0)
+                                        save(I[i_q], I_st[i_q])
+                                        save(Q[i_q], Q_st[i_q])
+                                align()
 
         with stream_processing():
             n_st.save("n")
@@ -229,8 +296,8 @@ def build_program(
                 I_tr_st[i_q].buffer(2).buffer(num_training_shots).save(f"I_train{i_q + 1}")
                 Q_tr_st[i_q].buffer(2).buffer(num_training_shots).save(f"Q_train{i_q + 1}")
 
-                I_st[i_q].buffer(len(gate_counts)).buffer(len(sym_indices)).buffer(3).buffer(num_shots).save(f"I_tomo{i_q + 1}")
-                Q_st[i_q].buffer(len(gate_counts)).buffer(len(sym_indices)).buffer(3).buffer(num_shots).save(f"Q_tomo{i_q + 1}")
+                I_st[i_q].buffer(len(gate_counts)).buffer(len(sym_indices)).buffer(3).buffer(len(noise_conditions)).buffer(num_shots).save(f"I_tomo{i_q + 1}")
+                Q_st[i_q].buffer(len(gate_counts)).buffer(len(sym_indices)).buffer(3).buffer(len(noise_conditions)).buffer(num_shots).save(f"Q_tomo{i_q + 1}")
 
     return prog, sweep_axes
 
@@ -246,12 +313,14 @@ def acquire(
     config: Optional[dict] = None,
 ) -> xr.Dataset:
     from qualang_tools.multi_user import qm_session
+    from qualang_tools.results import fetching_tool, progress_counter
 
     qmm = machine.connect()
     config = config if config is not None else machine.generate_config()
 
-    qubit_names = list(sweep_axes["qubit"].values)
+    qubit_names = list(sweep_axes["target"].values if "target" in sweep_axes else sweep_axes["qubit"].values)
     num_qubits = len(qubit_names)
+    noise_conditions = list(sweep_axes["noise_condition"].values)
     bases = list(sweep_axes["basis"].values)
     sym_indices = list(sweep_axes["sym"].values)
     gate_counts = list(sweep_axes["gate_count"].values)
@@ -261,6 +330,13 @@ def acquire(
 
     with qm_session(qmm, config, timeout=timeout) as qm:
         job = qm.execute(prog)
+
+        # Display progress bar for tomography shots
+        fetcher = fetching_tool(job, ["n"], mode="live")
+        while fetcher.is_processing():
+            n_val = fetcher.fetch_all()[0]
+            progress_counter(n_val, num_shots, start_time=fetcher.start_time)
+
         results = job.result_handles
         results.wait_for_all_values()
 
@@ -296,8 +372,8 @@ def acquire(
             I_train_list.append(np.transpose(i_tr, (1, 0)))
             Q_train_list.append(np.transpose(q_tr, (1, 0)))
 
-            I_tomo_list.append(np.transpose(i_to, (1, 2, 3, 0)))
-            Q_tomo_list.append(np.transpose(q_to, (1, 2, 3, 0)))
+            I_tomo_list.append(np.transpose(i_to, (1, 2, 3, 4, 0)))
+            Q_tomo_list.append(np.transpose(q_to, (1, 2, 3, 4, 0)))
 
         I_train_arr = np.stack(I_train_list, axis=0)
         Q_train_arr = np.stack(Q_train_list, axis=0)
@@ -305,21 +381,25 @@ def acquire(
         Q_tomo_arr = np.stack(Q_tomo_list, axis=0)
 
         if log:
-            rep = getattr(job, "execution_report", None)
-            if callable(rep):
-                log(rep())
-            elif rep is not None:
-                log(rep)
+            try:
+                rep = getattr(job, "execution_report", None)
+                if callable(rep):
+                    log(rep())
+                elif rep is not None:
+                    log(rep)
+            except Exception:
+                pass
 
     ds = xr.Dataset(
         data_vars={
-            "I_tomo": (("qubit", "basis", "sym", "gate_count", "shot_idx"), I_tomo_arr),
-            "Q_tomo": (("qubit", "basis", "sym", "gate_count", "shot_idx"), Q_tomo_arr),
-            "I_train": (("qubit", "prepared_state", "train_shot_idx"), I_train_arr),
-            "Q_train": (("qubit", "prepared_state", "train_shot_idx"), Q_train_arr),
+            "I_tomo": (("target", "noise_condition", "basis", "sym", "gate_count", "shot_idx"), I_tomo_arr),
+            "Q_tomo": (("target", "noise_condition", "basis", "sym", "gate_count", "shot_idx"), Q_tomo_arr),
+            "I_train": (("target", "prepared_state", "train_shot_idx"), I_train_arr),
+            "Q_train": (("target", "prepared_state", "train_shot_idx"), Q_train_arr),
         },
         coords={
-            "qubit": qubit_names,
+            "target": qubit_names,
+            "noise_condition": noise_conditions,
             "basis": bases,
             "sym": sym_indices,
             "gate_count": gate_counts,
@@ -355,6 +435,7 @@ class QMQubitTomography(QubitTomography):
             gate_counts=list(self.params.gate_counts),
             num_shots=int(self.params.num_averages),
             num_training_shots=int(self.params.num_training_shots),
+            interleave_noise=getattr(self.params, "interleave_noise", True),
             symmetrized_readout=self.params.symmetrized_readout,
             reset_type=check_reset_method(self),
         )
