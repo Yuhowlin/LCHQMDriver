@@ -1148,6 +1148,14 @@ class QMBackend(Backend):
         from qm import generate_qua_script
 
         config = self._machine.generate_config()
+        # A shell whose program only compiles against an AMENDED config (the
+        # parametric-drive z oscillator; acquire() binds the amendment into its
+        # own fetch callable) exposes patch_preview_config(config) so the
+        # dumped script and the gateway simulation see the same config the
+        # real run would execute against.
+        patch = getattr(experiment, "patch_preview_config", None)
+        if patch is not None:
+            config = patch(config)
         script = generate_qua_script(prog, config)
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / "qua_script.py"

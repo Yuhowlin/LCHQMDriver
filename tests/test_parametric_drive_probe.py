@@ -133,6 +133,41 @@ def test_program_builds_on_live_state_with_canonical_axes(machine, discriminate)
     assert "update_frequency" in script
 
 
+def test_preview_compiles_against_the_patched_config(machine, tmp_path, monkeypatch):
+    """backend.preview must hand the SAME oscillator-amended config to the
+    script dump (and the gateway simulation) that a real run executes against —
+    the live gateway refuses the unpatched one by name ('Can not change the
+    intermediate frequency of quantum Element q1.z because its' initial value
+    was none', observed 2026-08-20)."""
+    import qm
+
+    from scqo.roster import parse_components
+    from scqo_qm.backend.qm_backend import QMBackend
+    from scqo_qm.backend.roster_gen import roster_toml_for
+    from scqo_qm.experiments.qubit_parametric_drive import QMQubitParametricDrive
+
+    captured = {}
+    real = qm.generate_qua_script
+
+    def capture(prog, config):
+        captured["config"] = config
+        return real(prog, config)
+
+    monkeypatch.setattr(qm, "generate_qua_script", capture)
+
+    backend = QMBackend(machine, roster=parse_components(roster_toml_for(machine)))
+    exp = QMQubitParametricDrive(
+        backend, QMQubitParametricDrive.Parameters(
+            targets=["q1"], min_parametric_amp_v=0.0, max_parametric_amp_v=0.1,
+            min_parametric_freq_hz=50e6, max_parametric_freq_hz=150e6,
+            num_averages=10))
+    exp.sweep_axes = exp.define_sweep()
+    backend.preview(exp, tmp_path, no_simulate=True)
+    z_name = machine.qubits["q1"].z.name
+    assert captured["config"]["elements"][z_name]["intermediate_frequency"] == 50e6
+    assert (tmp_path / "qua_script.py").exists()
+
+
 def test_probe_binds_the_patched_config_into_its_acquire(machine):
     from scqo_qm.backend.qm_backend import QMBackend
     from scqo_qm.backend.roster_gen import roster_toml_for

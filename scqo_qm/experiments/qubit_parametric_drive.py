@@ -29,10 +29,12 @@ would lose the patch. A tree that already declares a z IF is respected
 (``setdefault``); the seed value is irrelevant, since every sweep iteration
 sets the frequency itself.
 
-``--preview`` note: the shell builds a standalone program, so preview renders
-the script normally — but the script (and any gateway simulation) uses the
-UNPATCHED config, so the waveform simulation may refuse the missing z
-oscillator and degrade to script-only with a PreviewWarning.
+``--preview`` renders fully: the shell builds a standalone program, and the
+backend's ``patch_preview_config`` hook applies the same oscillator patch to
+the preview's config, so the dumped script and the gateway waveform simulation
+compile against what a real run would execute. (Confirmed live 2026-08-20:
+without the patch the gateway refuses with "Can not change the intermediate
+frequency of quantum Element q1.z because its' initial value was none".)
 """
 
 from __future__ import annotations
@@ -274,3 +276,16 @@ class QMQubitParametricDrive(QubitParametricDrive):
             float(freqs[0]),
         )
         return prog, sweep_axes, partial(acquire, config=config)
+
+    def patch_preview_config(self, config: dict) -> dict:
+        """Backend preview hook: the same z-oscillator amendment acquire()
+        binds, applied to the preview's own config so the dumped script and
+        the gateway simulation compile (module docstring)."""
+        from scqo_qm.experiments._lib import select_qubits
+
+        machine = self.backend.machine  # type: ignore[attr-defined]
+        qubits = select_qubits(machine, self.params.targets, multiplexed=True)
+        seed = float(np.round(np.asarray(
+            self.sweep_axes["parametric_freq_hz"], dtype=float)[0]))
+        return ensure_flux_oscillators(
+            config, [qubit.z.name for qubit in qubits], seed)
