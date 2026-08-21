@@ -33,6 +33,8 @@ scqo_qm/
                          #   is <data_root>/<device>/components.toml)
     _distortion.py       # flux-distortion facts -> exponential-filter arithmetic (pure)
     apply_distortion.py  # operator CLI: python -m scqo_qm.backend.apply_distortion
+                         #   (QMBackend.distortion_apply_command hands scqo's two
+                         #   cryoscopes this command line as their writeback hint)
   experiments/
     __init__.py          # one import line per experiment module so @register runs (manual;
                          #   tests/test_experiment_registration.py enforces completeness both

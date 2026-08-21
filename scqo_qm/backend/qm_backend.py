@@ -979,6 +979,23 @@ class QMBackend(Backend):
         except Exception:
             return None
 
+    def distortion_apply_command(self, target: str,
+                                 run_id: str | None = None) -> str:
+        """The command that turns a cryoscope's measured taps into THIS
+        instrument's predistortion filter — scqo's duck-typed hint hook
+        (``scqo.experiments._distortion_hint``), printed by both cryoscopes right
+        after they propose ``distortion_amp``/``distortion_tau_s``.
+
+        Run-addressed whenever the run is known: ``--run`` names exactly which
+        measurement feeds the filter, so ``scqo accept`` order cannot change what
+        lands on the OPX (the two cryoscopes share ONE fact slot with REPLACE
+        semantics — see :mod:`scqo_qm.backend.apply_distortion`). Without a run id
+        the command reads the accepted facts instead, which is the same default
+        the CLI has.
+        """
+        run = f" --run {run_id}" if run_id else ""
+        return f"python -m scqo_qm.backend.apply_distortion --target {target}{run}"
+
     def power_context(self, qubits: list[str]) -> dict:
         """Raw readout + drive chain values per qubit (run-record provenance only).
 
