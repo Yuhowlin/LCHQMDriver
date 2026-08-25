@@ -41,6 +41,7 @@ from . import qubit_parity_switch_discrete  # noqa: F401  (import side effect: @
 from . import qubit_pi_pulse_error  # noqa: F401  (import side effect: @register)
 from . import qubit_power_rabi  # noqa: F401  (import side effect: @register)
 from . import qubit_ramsey  # noqa: F401  (import side effect: @register)
+from . import qubit_ramsey_phasor  # noqa: F401  (import side effect: @register)
 from . import qubit_relaxation  # noqa: F401  (import side effect: @register)
 from . import qubit_relaxation_flux_pulse  # noqa: F401  (import side effect: @register)
 from . import qubit_spectroscopy  # noqa: F401  (import side effect: @register)
