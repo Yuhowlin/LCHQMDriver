@@ -1,5 +1,5 @@
-"""Parametric-drive resonance-map acquisition probe: vendor code only (qm/quam) —
-no qualibrate, no scqo, no scqat.
+"""Parametric-drive resonance-map (frequency x AMPLITUDE) acquisition probe:
+vendor code only (qm/quam) — no qualibrate, no scqo, no scqat.
 
 Prepare the qubit (x180), then MODULATE its own flux (z) line with an RF tone —
 the z element's oscillator is stepped to the swept drive frequency with
@@ -11,30 +11,18 @@ parametrically transfers out of the qubit; the 2D population map over
 (amplitude, frequency) draws the resonance line(s). Same flux-line technique as
 :class:`scqo_qm.components.macros.parametric_reset_macro.ParametricReset`.
 
+Sibling of ``qubit_parametric_drive_time``, which fixes the amplitude and
+sweeps the driving TIME instead. Everything the two share — the settle gap,
+the ns->cycles guards, the z-oscillator config patch, the config-forwarding
+``acquire`` and the preview hook — lives in ``_parametric.py``; read its
+docstring for WHY these probes carry their own config.
+
 Revived from the retired ``LCH_qubit_parametric_drive_fixed_time`` probe (git
 ``cc04cec^``), modernized for scqo: EVERY selected qubit is driven (the node
 drove only the first of the batch), the sweep is absolute volts only (the
 rail + amplitude_scale + idle-sum guard is ``check_flux_pulse_relative``), and
 the axes carry the canonical scqo names.
 
-THE Z-LINE OSCILLATOR — why this probe carries its own config. quam's
-``FluxLine`` ships ``intermediate_frequency=None``, so the generated config's z
-elements carry NO oscillator and a program that ``update_frequency``'s them is
-refused at compile. :func:`ensure_flux_oscillators` patches the GENERATED
-CONFIG DICT (never the QUAM tree — a z IF leaked into the live tree would
-modulate every later flux pulse in the session), and ``probe()`` returns the
-3-tuple ``(prog, sweep_axes, acquire)`` with the patched config bound into the
-acquire callable — the backend's shared fetch path regenerates a config and
-would lose the patch. A tree that already declares a z IF is respected
-(``setdefault``); the seed value is irrelevant, since every sweep iteration
-sets the frequency itself.
-
-``--preview`` renders fully: the shell builds a standalone program, and the
-backend's ``patch_preview_config`` hook applies the same oscillator patch to
-the preview's config, so the dumped script and the gateway waveform simulation
-compile against what a real run would execute. (Confirmed live 2026-08-20:
-without the patch the gateway refuses with "Can not change the intermediate
-frequency of quantum Element q1.z because its' initial value was none".)
 """
 
 from __future__ import annotations
@@ -47,48 +35,17 @@ from qm.qua import *
 
 from qualang_tools.loops import from_array
 
-from scqo_qm.experiments._lib import acquire as _acquire
 from scqo_qm.experiments._flux_limits import (
     check_flux_pulse_relative,
     declared_idle_offset_v,
 )
-
-#: settle gap (ns) between the pi pulse and the parametric tone, so the drive
-#: pulse rings down before the flux modulation starts (the retired node's 200).
-_PREP_SETTLE_NS = 200
-
-
-def drive_time_cycles(drive_time_ns: int) -> int:
-    """The fixed driving time as QUA clock cycles — refused by name off-grid.
-
-    ``play(duration=...)`` counts 4 ns cycles and the shortest playable pulse
-    is 16 ns, so a time that is not a positive multiple of 4 (or is shorter
-    than 16 ns) would be silently truncated by integer division — refuse it
-    instead. Pure: pinned by ``tests/test_parametric_drive_probe.py``."""
-    t = int(drive_time_ns)
-    if t < 16 or t % 4 != 0:
-        raise ValueError(
-            f"drive_time_ns must be a multiple of 4 ns and >= 16 ns on the QM "
-            f"backend (play() counts 4 ns cycles; 16 ns is the shortest "
-            f"pulse), got {drive_time_ns}.")
-    return t // 4
-
-
-def ensure_flux_oscillators(config: dict, elements, seed_hz: float) -> dict:
-    """Give each named z ELEMENT of a generated config an oscillator.
-
-    Adds ``intermediate_frequency: seed_hz`` to every named element that does
-    not already declare one (``setdefault`` — a tree-declared IF wins), so the
-    program's ``update_frequency`` compiles. Mutates and returns ``config``;
-    the QUAM tree itself is never touched. Pure dict surgery: pinned by
-    ``tests/test_parametric_drive_probe.py``."""
-    for name in elements:
-        if name not in config.get("elements", {}):
-            raise ValueError(
-                f"element {name!r} is not in the generated config; cannot "
-                f"attach the parametric-drive oscillator")
-        config["elements"][name].setdefault("intermediate_frequency", float(seed_hz))
-    return config
+from scqo_qm.experiments._parametric import (
+    PREP_SETTLE_NS,
+    FluxOscillatorPreviewMixin,
+    acquire,
+    drive_time_cycles,
+    ensure_flux_oscillators,
+)
 
 
 def build_program(
@@ -104,7 +61,8 @@ def build_program(
     simulate: bool = False,
     log: Optional[Callable] = None,
 ):
-    """Build the parametric-drive (fixed-time) QUA program. Returns (program, sweep_axes).
+    """Build the parametric-drive (fixed-TIME, swept amplitude) QUA program.
+    Returns (program, sweep_axes).
 
     ``amps_v`` is the drive-amplitude sweep in ABSOLUTE volts — a z-pulse
     excursion riding on the standing bias ``initialize_qpu`` applied, validated
@@ -172,7 +130,7 @@ def build_program(
                         for i, qubit in multiplexed_qubits.items():
                             qubit.xy.play("x180")
                         align()
-                        wait(_PREP_SETTLE_NS // 4)
+                        wait(PREP_SETTLE_NS // 4)
 
                         # The parametric tone: swept volts on each qubit's own
                         # z line for the fixed driving time. reset_if_phase
@@ -209,43 +167,24 @@ def build_program(
     return prog, sweep_axes
 
 
-def acquire(
-    machine,
-    prog,
-    sweep_axes,
-    *,
-    num_shots: int,
-    timeout: float,
-    log: Optional[Callable] = None,
-    config: Optional[dict] = None,
-) -> xr.Dataset:
-    """Connect to the QOP, execute the program and fetch the raw xr.Dataset.
-
-    Pass the oscillator-patched config from ``probe()`` as ``config``; the
-    shared execute-and-fetch helper would otherwise regenerate a config whose z
-    elements carry no oscillator and the compile would refuse
-    ``update_frequency``.
-    """
-    return _acquire(machine, prog, sweep_axes, num_shots=num_shots,
-                    timeout=timeout, log=log, config=config)
-
-
 from functools import partial
 from typing import Any
 
 import numpy as np
 
 from scqo import register
-from scqo.experiments import QubitParametricDrive
+from scqo.experiments import QubitParametricDriveAmp
 
 
 @register
-class QMQubitParametricDrive(QubitParametricDrive):
-    """Build a multiplexed parametric-drive map QUA program on the QM OPX.
+class QMQubitParametricDriveAmp(FluxOscillatorPreviewMixin, QubitParametricDriveAmp):
+    """Build a multiplexed parametric-drive (frequency x amplitude) QUA program
+    on the QM OPX.
 
     Returns the 3-tuple probe shape ``(prog, sweep_axes, acquire)`` — not for
     heterogeneous streams (the fetch is the shared one) but to bind the
-    oscillator-patched config into the acquire callable (module docstring)."""
+    oscillator-patched config into the acquire callable (``_parametric.py``).
+    ``patch_preview_config`` is inherited from FluxOscillatorPreviewMixin."""
 
     def probe(self) -> Any:
         from ._reset import check_reset_method
@@ -277,15 +216,3 @@ class QMQubitParametricDrive(QubitParametricDrive):
         )
         return prog, sweep_axes, partial(acquire, config=config)
 
-    def patch_preview_config(self, config: dict) -> dict:
-        """Backend preview hook: the same z-oscillator amendment acquire()
-        binds, applied to the preview's own config so the dumped script and
-        the gateway simulation compile (module docstring)."""
-        from scqo_qm.experiments._lib import select_qubits
-
-        machine = self.backend.machine  # type: ignore[attr-defined]
-        qubits = select_qubits(machine, self.params.targets, multiplexed=True)
-        seed = float(np.round(np.asarray(
-            self.sweep_axes["parametric_freq_hz"], dtype=float)[0]))
-        return ensure_flux_oscillators(
-            config, [qubit.z.name for qubit in qubits], seed)
