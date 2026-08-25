@@ -3,7 +3,7 @@
 ## Project Overview
 Two products in one repo (renamed from LCHQMDriver in the v1 restructure):
 1. **`scqo_qm/`** — the Quantum Machines OPX1000 backend for **`scqo`**, the vendor-neutral
-   experiment API shared with the Qblox driver (`D:\github\scqo-qblox`), so the same experiment
+   experiment API shared with the Qblox driver ([scqo-qblox](https://github.com/shiau109/scqo-qblox)), so the same experiment
    runs on either instrument through one `Session`. scqo is a HARD dependency.
 2. **Vendored official qualibrate calibrations** (`calibrations/` + `calibration_utils/`, copied in
    by `sync_official.py`) — the qualibrate GUI path, official nodes only. The custom LCH_* qualibrate
@@ -39,7 +39,7 @@ scqo_qm/
     __init__.py          # one import line per experiment module so @register runs (manual;
                          #   tests/test_experiment_registration.py enforces completeness both
                          #   directions) + the qm-logging stderr re-home (see Operational Notes)
-    <name>.py            # ONE FILE PER EXPERIMENT (all 36): merged physics docstring, a
+    <name>.py            # ONE FILE PER EXPERIMENT (one per registered scqo experiment): merged physics docstring, a
                          #   module-level build_program(...) (+ own acquire() where the streams
                          #   are heterogeneous), and the registered QM<Name>(<Name>) class whose
                          #   probe() maps self.params -> the local builder
@@ -139,8 +139,11 @@ threshold, the Bayesian one a missing confusion matrix, BY NAME before any QUA i
 
 **Active reset** (`reset_method="active"`) lives in `scqo_qm/experiments/_reset.py`, the ONE door
 (`check_reset_method`), with `QMBackend.acquire` re-checking before `probe()`. Opt-in is per
-experiment (`supports_active_reset`, default DENY), limited to the six coherent-drive carriers
-(relaxation/ramsey/echo/power_rabi + the two T1 trackers); everything else refuses BY NAME. The
+experiment (`supports_active_reset`, default DENY), limited to the coherent-drive carriers
+whose readout condition is fixed for the whole run; everything else refuses BY NAME.
+`tests/test_reset_method.py`'s `CARRIERS` literal is the authority for WHICH - do not restate
+the list here, and do not assume it matches Qblox's (it does not: Qblox denies
+`qubit_ramsey_phasor` pending its hardware run). The
 sequence is QUAM's `reset_qubit_active` (repeat-until-success). Four QM-specific rules, each a
 SILENT failure if broken: (1) `active_reset_rounds` → QUAM `max_attempts` is an UPPER bound;
 (2) BOTH `readout_threshold` AND `readout_rus_threshold` are required even at rounds=1, and an
@@ -153,13 +156,13 @@ still owed).
 `generate_qua_script` to `qua_script.py` (offline), then AUTO-TRIES the gateway simulator →
 `simulated_waveforms.html` (2 s TCP probe gates the attempt; any failure degrades to script-only
 with a PreviewWarning). `--no-simulate` = guaranteed offline; `--simulate-ns` widens the 20 µs
-default window. Six experiments acquire INSIDE `probe()` and are refused by name BEFORE it runs,
+default window. Some experiments acquire INSIDE `probe()` and are refused by name BEFORE it runs,
 each declaring `probe_self_acquires = "<why>"` (default-ALLOW polarity — contrast
-`supports_active_reset`): pair_swap_chevron, qc_n_swap_amp, qubit_drag_equator,
-qubit_drag_alternating, qubit_ramsey_cryoscope, qubit_xyz_delay. `tests/test_preview.py`'s census
-enforces the set both directions.
+`supports_active_reset`). `tests/test_preview.py`'s `SELF_ACQUIRING` literal is the authority
+and enforces the set both directions - read it there rather than trusting a list in prose,
+which is exactly how this one went stale at 6 while the real set had grown to 9.
 
-**Placement rule** (`scqo state --rule`; SCQO TUTORIAL §9): QUAM-tree copies of physics the tree
+**Placement rule** (`scqo state --rule`; SCQO TUTORIAL §10, "Where does a value live?"): QUAM-tree copies of physics the tree
 operationally CONSUMES (T1 for thermalization, anharmonicity for DRAG) are CACHES with scqo's
 physical.json as truth; QUAM's stored measured artifacts (confusion_matrix, gate_fidelity, ...)
 are dead to SCQO.
@@ -198,7 +201,7 @@ experiment — never add per-command wrappers). `simulated` is the practice mode
   commit. `customized/`'s frozen archive and `scqo_qm/` are never touched by the sync.
 - **`calibrations/offline_graph/`** holds manual `LCH_graph_*.py` post-processing scripts
   (editable lab code; qualibrate does not list them).
-- **Environments:** the scqo path runs in `D:\github\.venv-qm` (rebuildable from
+- **Environments:** the scqo path runs in the shared `.venv-qm` (rebuildable from
   `requirements-qm.lock.txt`); siblings `.venv-view` (no instrument libs) and `.venv-qblox`.
   `qm.bat` activates `.venv-qm` and runs `qualibrate start` (GUI).
 - **qm logging vs the CLI JSON contract:** fused experiment modules import `qm.qua` at module
@@ -217,8 +220,12 @@ experiment — never add per-command wrappers). `simulated` is the practice mode
 Run as **`.venv\Scripts\python.exe -m pytest tests\ -q`** (the repo venv is built from
 `requirements-qm.lock.txt` + editable scqo/scqat; avoid bare `uv run` — its sync would rebuild
 the env from pyproject, displacing the lockfile pin authority. `uv run --no-sync` is the
-acceptable alternative). **~309 tests, ~100 s — the full suite IS the targeted run**; run it
-before every commit. Live-state tests load the repo-relative `quam_state/` (hermetic — no
+acceptable alternative). **The full suite IS the targeted run here** - it is small enough that a
+selection map would cost more attention than it saves; run it before every commit. If the repo
+venv is missing or stale, use the shared one: the v3.0.0 release notes record the repo venv
+failing to collect for want of `typing_extensions`, and both recent cuts were validated with the
+shared venv. No test count is quoted here on purpose - see the `OFFLINE-VALIDATED` line in the
+matching RELEASES.toml block for what each release actually ran. Live-state tests load the repo-relative `quam_state/` (hermetic — no
 `~/.qualibrate` dependency).
 
 | File | Covers | Needs QM stack? |
@@ -238,18 +245,26 @@ before every commit. Live-state tests load the repo-relative `quam_state/` (herm
 
 ## Workspace Packages (Read-Only)
 The vendor stack (`qm` → `quam` → `quam_builder` → `qualibrate`) is available read-only; do NOT
-modify. For the SC-qubit repo layout see the global workspace map `C:\Users\shiau\.claude\CLAUDE.md`.
+The sibling repos are [SCQO](https://github.com/shiau109/SCQO) (the vendor-neutral core, a hard dependency resolved as `../SCQO`), [scqat](https://github.com/shiau109/scqat) (analysis) and [scqo-qblox](https://github.com/shiau109/scqo-qblox) (the Qblox backend - never import from it).
 
 ## Rules for the AI assistant
+
+Rules 1–5 are about **what may be edited** and hold everywhere, forks included. Rule 6 is a
+*lab-tree* rule: it exists because the maintainer's checkout is shared and live (editable
+installs, sometimes a running hardware session). In your own fork it does not apply — work on a
+feature branch and open a PR, as [AGENTS.md](AGENTS.md) describes.
+
 1. **Do NOT edit vendored official files** (`calibrations/` non-graph files, `calibration_utils/`).
    Change behavior in `scqo_qm/` instead, or update upstream and re-sync.
-2. **Always present a plan before modifying code.**
-3. **Editable code lives in:** `scqo_qm/`, `quam_config/`, `scripts/`,
-   `calibrations/offline_graph/`.
-4. **Never touch the frozen archive** (`customized/`, `calibrations/exclude/`) — it exists for
-   history, not for running.
-5. **Skip `data/`** — data storage only.
-6. **Flag critical vendor dependencies** when creating or modifying scqo_qm code.
-7. **Report conflicts** between the working tree and these instructions before changing anything.
-8. **No qualibrate nodes.** New experiments are fused files in `scqo_qm/experiments/`
+2. **Editable code lives in:** `scqo_qm/`, `quam_config/`, `scripts/`,
+   `calibrations/offline_graph/`. Everything else is vendored, generated, or frozen.
+3. **Never touch the frozen archive** (`customized/`, `calibrations/exclude/`) — it exists for
+   history, not for running. It *is* packaged (`pyproject.toml` ships it so `exclude/` stays
+   importable), which is not permission to edit it.
+4. **Skip `data/`** — data storage only, and gitignored, so a fresh clone has none.
+5. **No qualibrate nodes.** New experiments are fused files in `scqo_qm/experiments/`
    (**Adding an experiment**); qualibrate scaffolding returns only on explicit request.
+6. **In the maintainer's tree only:** present a plan and get the maintainer's approval before
+   modifying code, call out any critical vendor dependency you add or change, and report
+   working-tree/instruction conflicts before changing anything. Several agents share that tree
+   at once, so a file someone else has modified is off limits.
