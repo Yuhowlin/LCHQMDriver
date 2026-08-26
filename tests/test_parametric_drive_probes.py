@@ -221,8 +221,8 @@ def test_preview_compiles_against_the_patched_config(machine, tmp_path, monkeypa
     backend = QMBackend(machine, roster=parse_components(roster_toml_for(machine)))
     exp = QMQubitParametricDriveAmp(
         backend, QMQubitParametricDriveAmp.Parameters(
-            targets=["q1"], min_parametric_amp_v=0.0, max_parametric_amp_v=0.1,
-            min_parametric_freq_hz=50e6, max_parametric_freq_hz=150e6,
+            targets=["q1"], start_parametric_amp_v=0.0, end_parametric_amp_v=0.1,
+            start_parametric_freq_hz=50e6, end_parametric_freq_hz=150e6,
             num_averages=10))
     exp.sweep_axes = exp.define_sweep()
     backend.preview(exp, tmp_path, no_simulate=True)
@@ -240,8 +240,8 @@ def test_probe_binds_the_patched_config_into_its_acquire(machine):
     backend = QMBackend(machine, roster=parse_components(roster_toml_for(machine)))
     exp = QMQubitParametricDriveAmp(
         backend, QMQubitParametricDriveAmp.Parameters(
-            targets=["q1"], min_parametric_amp_v=0.0, max_parametric_amp_v=0.1,
-            min_parametric_freq_hz=50e6, max_parametric_freq_hz=150e6,
+            targets=["q1"], start_parametric_amp_v=0.0, end_parametric_amp_v=0.1,
+            start_parametric_freq_hz=50e6, end_parametric_freq_hz=150e6,
             num_averages=10))
     exp.sweep_axes = exp.define_sweep()
     res = exp.probe()
@@ -324,7 +324,7 @@ def test_time_probe_binds_the_patched_config_into_its_acquire(machine):
     exp = QMQubitParametricDriveTime(
         backend, QMQubitParametricDriveTime.Parameters(
             targets=["q1"], parametric_amp_v=0.05,
-            min_parametric_freq_hz=50e6, max_parametric_freq_hz=150e6,
+            start_parametric_freq_hz=50e6, end_parametric_freq_hz=150e6,
             num_freq_points=5, num_time_points=8, num_averages=10))
     exp.sweep_axes = exp.define_sweep()
     times_before = np.array(exp.sweep_axes["drive_time_ns"], dtype=float)
@@ -362,10 +362,42 @@ def test_time_preview_compiles_against_the_patched_config(machine, tmp_path, mon
     exp = QMQubitParametricDriveTime(
         backend, QMQubitParametricDriveTime.Parameters(
             targets=["q1"], parametric_amp_v=0.05,
-            min_parametric_freq_hz=50e6, max_parametric_freq_hz=150e6,
+            start_parametric_freq_hz=50e6, end_parametric_freq_hz=150e6,
             num_freq_points=5, num_time_points=8, num_averages=10))
     exp.sweep_axes = exp.define_sweep()
     backend.preview(exp, tmp_path, no_simulate=True)
     z_name = machine.qubits["q1"].z.name
     assert captured["config"]["elements"][z_name]["intermediate_frequency"] == 50e6
     assert (tmp_path / "qua_script.py").exists()
+
+
+def test_a_reversed_window_still_plays_ascending_and_seeds_the_low_edge(machine):
+    """The scqo window takes its edges in either order and normalises the axis
+    ascending, so the DRIVER never sees a descending sweep. The oscillator patch
+    is seeded from the first PLAYED frequency, which is therefore the LOW edge —
+    the other tests pass their edges ascending and would not notice a regression
+    that leaked the raw start_ value through."""
+    from scqo.roster import parse_components
+    from scqo_qm.backend.qm_backend import QMBackend
+    from scqo_qm.backend.roster_gen import roster_toml_for
+    from scqo_qm.experiments.qubit_parametric_drive_time import QMQubitParametricDriveTime
+
+    backend = QMBackend(machine, roster=parse_components(roster_toml_for(machine)))
+    exp = QMQubitParametricDriveTime(
+        backend, QMQubitParametricDriveTime.Parameters(
+            targets=["q1"], parametric_amp_v=0.05,
+            start_parametric_freq_hz=150e6, end_parametric_freq_hz=50e6,   # REVERSED
+            start_drive_time_ns=500.0, end_drive_time_ns=16.0,             # REVERSED
+            num_freq_points=5, num_time_points=8, num_averages=10))
+    exp.sweep_axes = exp.define_sweep()
+    _prog, axes, acquire_fn = exp.probe()
+
+    played = axes["parametric_freq_hz"].values
+    assert np.all(np.diff(played) > 0), "the driver was handed a descending axis"
+    assert float(played[0]) == 50e6
+    times = axes["drive_time_ns"].values
+    assert np.all(np.diff(times) > 0)
+    assert float(times[0]) == 16.0
+    z_name = machine.qubits["q1"].z.name
+    seed = acquire_fn.keywords["config"]["elements"][z_name]["intermediate_frequency"]
+    assert seed == 50e6, "the oscillator patch must be seeded from the LOW edge"
