@@ -64,6 +64,39 @@ def vendor_pair_name(experiment: Any, composite: str) -> str:
         f"{sorted(pairs)})")
 
 
+def vendor_qubit(experiment: Any, mode: str, *, field: str,
+                 kind: str = "drive") -> Any:
+    """The raw QUAM qubit behind a roster qubit MODE name.
+
+    The single-mode twin of :func:`vendor_pair`, for probes that address a qubit
+    scqo named in a PARAMETER rather than in ``targets`` (a chain's prep or reset
+    qubit): ``machine.qubits[mode]`` would be string arithmetic on an entity
+    name, so the join goes through the roster's default channel of ``kind`` and
+    that channel view's ``qubit`` — the same route :func:`flux_source_name`
+    takes. Going through the channel KIND is also the capability guard: a mode
+    with no channel of that kind fails here, on a clear roster error, instead of
+    deep inside a QUA program.
+
+    ``kind`` is the channel the probe will actually play on — ``"drive"`` for an
+    xy pulse, ``"flux"`` for a z-line technique — so the refusal names the wire
+    that is missing. ``field`` is the Parameters field the name came from and
+    appears in every refusal.
+    """
+    roster = experiment.device.roster
+    try:
+        channel = roster.default_channel(mode, kind)
+    except Exception as err:
+        raise ValueError(
+            f"{field}={mode!r}: no default {kind} channel in this roster "
+            f"({err})") from err
+    qubit = getattr(experiment.backend.device.component(channel), "qubit", None)
+    if qubit is None:
+        raise ValueError(
+            f"{field}={mode!r}: its {kind} channel {channel!r} serves no QUAM "
+            f"qubit (a tunable coupler has none) - name a qubit mode")
+    return qubit
+
+
 def role_member(roster: Any, pair: str, role: str) -> str:
     """The ONE mode filling a pair's ``high``/``low`` role (roster truth)."""
     members = roster.entities[pair].roles.get(role, ())
