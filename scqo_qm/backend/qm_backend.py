@@ -1151,7 +1151,7 @@ class QMBackend(Backend):
                 f"{name} cannot be previewed on the QM backend: {reason} — {refusal}")
         check_reset_method(experiment)  # same backstop as acquire()
         with self._thermalization_override(experiment):
-            if reason:  # single-target self-acquiring (gate passed): build the one program
+            if hasattr(experiment, "preview_program"):
                 prog = experiment.preview_program()
             else:
                 res = experiment.probe()
@@ -1286,6 +1286,94 @@ class QMBackend(Backend):
         waveforms = out_dir / "simulated_waveforms.html"
         fig.write_html(str(waveforms))
         return waveforms
+
+    def close_qm(self, *, qm_id: str | None = None) -> dict[str, Any]:
+        """Halt running jobs and close open Quantum Machines on the connected cluster.
+
+        Connects to the QOP cluster via `self._machine.connect()`, queries open
+        Quantum Machine IDs, inspects running jobs on them, halts/cancels any
+        active jobs, and closes the QM instances. When `qm_id` is None, also
+        calls `qmm.close_all_qms()` (or `qmm.close_all_quantum_machines()`) to
+        ensure all cluster sessions and hardware locks are completely released.
+        """
+        qmm = self._machine.connect()
+        open_qms: list[str] = []
+        if hasattr(qmm, "list_open_qms"):
+            try:
+                open_qms = list(qmm.list_open_qms())
+            except Exception:
+                open_qms = []
+        elif hasattr(qmm, "list_open_quantum_machines"):
+            try:
+                open_qms = list(qmm.list_open_quantum_machines())
+            except Exception:
+                open_qms = []
+
+        target_ids = [qm_id] if qm_id is not None else list(open_qms)
+        halted_jobs: list[str] = []
+        closed_qms: list[str] = []
+        errors: list[str] = []
+
+        for target_id in target_ids:
+            try:
+                qm = qmm.get_qm(target_id) if hasattr(qmm, "get_qm") else None
+                if qm is not None:
+                    job = None
+                    if hasattr(qm, "get_running_job"):
+                        try:
+                            job = qm.get_running_job()
+                        except Exception:
+                            job = None
+                    if job is not None:
+                        job_id = getattr(job, "id", str(job))
+                        if hasattr(job, "halt"):
+                            try:
+                                job.halt()
+                                halted_jobs.append(str(job_id))
+                            except Exception as e:
+                                errors.append(f"failed to halt job {job_id}: {e}")
+                        elif hasattr(job, "cancel"):
+                            try:
+                                job.cancel()
+                                halted_jobs.append(str(job_id))
+                            except Exception as e:
+                                errors.append(f"failed to cancel job {job_id}: {e}")
+                    if hasattr(qm, "close"):
+                        try:
+                            qm.close()
+                            closed_qms.append(target_id)
+                        except Exception as e:
+                            errors.append(f"failed to close QM {target_id}: {e}")
+            except Exception as e:
+                errors.append(f"error processing QM {target_id}: {e}")
+
+        if qm_id is None:
+            if hasattr(qmm, "close_all_qms"):
+                try:
+                    qmm.close_all_qms()
+                except Exception as e:
+                    errors.append(f"close_all_qms: {e}")
+            elif hasattr(qmm, "close_all_quantum_machines"):
+                try:
+                    qmm.close_all_quantum_machines()
+                except Exception as e:
+                    errors.append(f"close_all_quantum_machines: {e}")
+
+        close_qmm = getattr(qmm, "close", None)
+        if close_qmm is not None:
+            try:
+                close_qmm()
+            except Exception:
+                pass
+
+        return {
+            "success": len(errors) == 0,
+            "backend": "qm",
+            "open_qms": open_qms,
+            "halted_jobs": halted_jobs,
+            "closed_qms": closed_qms,
+            "errors": errors,
+        }
 
     @staticmethod
     def _to_canonical(raw: xr.Dataset, experiment: "Experiment") -> xr.Dataset:

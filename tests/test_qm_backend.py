@@ -871,7 +871,7 @@ def test_gate_target_probes_build_for_both_gates(machine, gate):
     from scqo_qm.experiments import qubit_drag_equator as drag_equator_probe
     from scqo_qm.experiments._lib import select_qubits
 
-    qubits_names = ["q4", "q5"]
+    qubits_names = list(machine.qubits.keys())[:2]
     qubits = select_qubits(machine, qubits_names, multiplexed=True)
 
     before = {q: quam_fields.get_drag_beta(machine.qubits[q], operation=gate)
@@ -1514,3 +1514,65 @@ def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
     finally:
         pulse.threshold, pulse.rus_exit_threshold = saved
         qubit.resonator.confusion_matrix = saved_cm
+
+
+def test_close_qm_halts_jobs_and_closes_machines(machine, live_roster, monkeypatch):
+    """QMBackend.close_qm queries open QMs, halts running jobs, closes QMs,
+    and calls close_all_qms."""
+    halted = []
+    closed = []
+    closed_all = []
+
+    class _JobDouble:
+        def __init__(self, job_id):
+            self.id = job_id
+
+        def halt(self):
+            halted.append(self.id)
+
+    class _QMDouble:
+        def __init__(self, qm_id, has_job=True):
+            self.id = qm_id
+            self._has_job = has_job
+
+        def get_running_job(self):
+            if self._has_job:
+                return _JobDouble(f"job-{self.id}")
+            return None
+
+        def close(self):
+            closed.append(self.id)
+
+    class _QMMDouble:
+        def __init__(self):
+            self.qms = {
+                "QM-1": _QMDouble("QM-1", has_job=True),
+                "QM-2": _QMDouble("QM-2", has_job=False),
+            }
+            self.closed = False
+
+        def list_open_qms(self):
+            return list(self.qms.keys())
+
+        def get_qm(self, qm_id):
+            return self.qms.get(qm_id)
+
+        def close_all_qms(self):
+            closed_all.append(True)
+
+        def close(self):
+            self.closed = True
+
+    fake_qmm = _QMMDouble()
+    monkeypatch.setattr(machine, "connect", lambda: fake_qmm, raising=False)
+
+    backend = QMBackend(machine, roster=live_roster)
+    res = backend.close_qm()
+
+    assert res["success"] is True
+    assert res["open_qms"] == ["QM-1", "QM-2"]
+    assert res["halted_jobs"] == ["job-QM-1"]
+    assert res["closed_qms"] == ["QM-1", "QM-2"]
+    assert closed_all == [True]
+    assert fake_qmm.closed is True
+
