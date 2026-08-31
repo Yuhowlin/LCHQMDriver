@@ -111,6 +111,29 @@ def test_preview_refusal_gate():
     assert nohook is not None and "inside a real run" in nohook
 
 
+def test_hook_without_self_acquiring_is_legal_at_any_target_count():
+    """A NORMAL shell may expose ``preview_program()`` too, and is never gated by
+    the single-target rule — that rule constrains SELF-ACQUIRING shells, whose
+    ``probe()`` is not a legal fallback.
+
+    ``qubit_tomography`` is the live case: it builds and returns like any normal
+    shell (so it is correctly absent from :data:`SELF_ACQUIRING`) and exposes the
+    hook only to render a cheaper program — training shots omitted. Pinned so the
+    census is not misread as 'only a self-acquiring shell may carry a hook'.
+    """
+    from scqo_qm.backend.qm_backend import _preview_refusal
+
+    cls = get("qubit_tomography")
+    assert cls.__module__.startswith("scqo_qm.")
+    assert "qubit_tomography" not in SELF_ACQUIRING
+    assert not getattr(cls, SELF_ACQUIRING_ATTR, None)
+    assert hasattr(cls, "preview_program")
+
+    for targets in (["p1"], ["p1", "p2", "p3"]):
+        assert _preview_refusal(
+            _fake_experiment(targets, self_acquiring=False, hook=True)) is None
+
+
 def test_multi_target_self_acquiring_preview_refuses(backend, roster, tmp_path):
     """qc_n_stark_amp HAS a preview_program hook, so with >1 target it is refused
     by the single-target gate (before any program is built — QUAM-free)."""

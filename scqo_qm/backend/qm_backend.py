@@ -77,6 +77,13 @@ def _preview_refusal(experiment) -> "str | None":
     self-acquires is refused; a normal build-and-return shell is never refused.
     Returns the refusal DETAIL (the backend prepends the experiment name + the
     shell's own reason); ``None`` means previewable.
+
+    ``preview_program()`` is NOT only a self-acquiring shell's escape hatch: ANY
+    shell may expose it to render something cheaper than what ``probe()`` builds
+    (``qubit_tomography`` drops its training shots that way). The single-target
+    rule above is a constraint on SELF-ACQUIRING shells specifically — a normal
+    shell's hook is used whatever the target count, because its ``probe()`` was
+    a legal fallback to begin with.
     """
     if not getattr(type(experiment), SELF_ACQUIRING_ATTR, None):
         return None
@@ -1151,7 +1158,10 @@ class QMBackend(Backend):
                 f"{name} cannot be previewed on the QM backend: {reason} — {refusal}")
         check_reset_method(experiment)  # same backstop as acquire()
         with self._thermalization_override(experiment):
-            if reason:  # single-target self-acquiring (gate passed): build the one program
+            # Any shell exposing the hook renders through it — a self-acquiring one
+            # because it has no other standalone program (the gate above passed), a
+            # normal one because its hook is the cheaper build of the same sequence.
+            if hasattr(experiment, "preview_program"):
                 prog = experiment.preview_program()
             else:
                 res = experiment.probe()
