@@ -26,6 +26,7 @@ from scqo.experiments import catalog, get
 SELF_ACQUIRING = {
     "broadband_qubit_spectroscopy",
     "broadband_resonator_spectroscopy",
+    "pair_swap_angle",
     "pair_swap_chevron",
     "qc_n_stark_amp",
     "qc_n_swap_amp",
