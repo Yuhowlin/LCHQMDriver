@@ -46,7 +46,7 @@ prepared/transfer panels), orders the per-shot states onto the readout schema's
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 import xarray as xr
@@ -56,6 +56,7 @@ from qualang_tools.loops import from_array
 
 from scqo_qm.experiments._lib import acquire as _acquire
 from scqo_qm.experiments._coupler_knob import guard_coupler_amplitudes
+from scqo_qm.experiments._amp_limits import check_amp_scale_window
 
 
 def _dedup_involved(measure_qubits, swap_pair) -> List:
@@ -85,6 +86,9 @@ def build_program(
     num_shots: int,
     reset_type: str,
     operation_gap_ns: int = 0,
+    compensation: Sequence[tuple] = (),
+    stark_operation: str = "stark",
+    stark_detuning_hz: float = 50e6,
     simulate: bool = False,
 ):
     """Build the N-swap x coupler-flux-amplitude QUA program.
@@ -122,6 +126,26 @@ def build_program(
         swap_pair, swap_operation, coupler_amplitudes,
         why="pair_swap_angle sweeps the coupler flux; qc_n_swap_amp sweeps the "
             "control qubit's flux and needs no coupler.")
+
+    # The phase-compensation tones. They are what turn the fitted per-round
+    # COMPOSITE angle back into the exchange angle (module docstring), so a
+    # missing stark op is refused by name rather than silently skipped.
+    compensation = list(compensation)
+    for qubit, _factor in compensation:
+        if stark_operation not in qubit.xy.operations:
+            raise ValueError(
+                f"Qubit {qubit.name} has no xy operation {stark_operation!r}; "
+                f"available: {list(qubit.xy.operations)}. Register it first "
+                f"(quam_config/register_stark.py).")
+    check_amp_scale_window([factor for _q, factor in compensation],
+                           name="stark compensation",
+                           knob="compensation_amps")
+    # The off-resonant IF each tone plays at, and the resonant one it is
+    # restored to for the prep pulse and the readout.
+    base_if = {qubit.name: qubit.xy.intermediate_frequency
+               for qubit, _factor in compensation}
+    stark_if = {name: int(stark_detuning_hz) + value
+                for name, value in base_if.items()}
 
     sweep_axes = {
         "qubit": xr.DataArray([q.name for q in measure_qubits]),
@@ -167,6 +191,13 @@ def build_program(
                     swap_pair.qubit_control.xy.play("x180")
                     align()
 
+                    # Detune the compensated members so their tones SHIFT rather
+                    # than rotate. Hoisted out of the round loop: the prep above
+                    # and the readout below both need the resonant IF, and
+                    # nothing between them does.
+                    for qubit, _factor in compensation:
+                        qubit.xy.update_frequency(stark_if[qubit.name])
+
                     # Circuit body: N swaps on the pair, each at the swept COUPLER
                     # amplitude. ctrl_amp is left None so the control qubit's flux
                     # pulse plays bare at its calibrated resonance amplitude - the
@@ -177,6 +208,23 @@ def build_program(
                         swap_pair.macros[swap_operation].apply(cplr_amp=c_a)
                         if gap_cycles > 0:
                             swap_pair.wait(gap_cycles)
+                        align()
+                        # The phase compensation, one instant per round, after
+                        # the gap so it cannot overlap the flux pulse. Every
+                        # phase source in the round is a Z rotation and they
+                        # commute with each other, so only their placement
+                        # relative to the EXCHANGE matters - and this is between
+                        # exchanges, which is the whole point.
+                        if compensation:
+                            for qubit, factor in compensation:
+                                qubit.xy.play(stark_operation,
+                                              amplitude_scale=factor)
+                            align()
+
+                    # Restore the resonant IFs before readout.
+                    for qubit, _factor in compensation:
+                        qubit.xy.update_frequency(base_if[qubit.name])
+                    if compensation:
                         align()
 
                     # Joint (multiplexed) readout of all measured qubits.
@@ -248,7 +296,7 @@ class QMPairSwapAngle(PairSwapAngle):
         no acquire. Shared by ``probe()`` (looped over targets + acquired) and
         ``preview_program()`` (a single pair, dumped for ``--preview``)."""
         from ._reset import check_reset_method
-        from ._vendor import role_side, vendor_pair
+        from ._vendor import role_side, vendor_pair, vendor_qubit
 
         # Resolved BEFORE any QUA is built, so a roster/params mismatch refuses
         # without costing instrument time.
@@ -270,8 +318,16 @@ class QMPairSwapAngle(PairSwapAngle):
         # has hardware evidence.
         reset = check_reset_method(self)
         qp = vendor_pair(self, pair)
+        # scqo has already refused a name that is not a member of this pair.
+        compensation = [
+            (vendor_qubit(self, name, field="compensation_amps"), float(factor))
+            for name, factor in self.params.compensation_amps.items()
+        ]
         return build_program(
             self.backend.machine, [qp.qubit_control, qp.qubit_target], qp,
+            compensation=compensation,
+            stark_operation=self.params.stark_operation,
+            stark_detuning_hz=self.params.stark_detuning_hz,
             swap_operation=self.params.swap_operation,
             rounds_array=np.asarray(self.sweep_axes["swap_count"]).astype(int),
             coupler_amplitudes=np.asarray(self.sweep_axes["coupler_flux_v"],

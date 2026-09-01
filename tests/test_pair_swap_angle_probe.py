@@ -185,3 +185,65 @@ def test_build_program_sweeps_the_coupler_not_the_control(live_pair):
     assert pair.coupler.name in script
     assert list(axes) == ["qubit", "shot", "coupler_amplitude", "round"]
     assert axes["coupler_amplitude"].attrs["units"] == "V"
+
+
+# ------------------------------------------- the phase-compensation tone
+
+
+def test_a_missing_stark_op_is_refused_by_name():
+    """The tone is what turns the fitted per-round composite angle back into the
+    exchange angle, so a member without the operation is refused rather than
+    silently left uncompensated -- which would look like a measurement."""
+    pair = _pair()
+    bare = _qubit("q1", ops=("x180",))          # no 'stark'
+    with pytest.raises(ValueError, match="no xy operation 'stark'"):
+        build_program(**_kwargs(pair=pair, compensation=[(bare, 0.3)]))
+
+
+def test_an_unrepresentable_compensation_factor_names_its_knob():
+    """QUA's amplitude_scale spans (-2, 2); the refusal must name the neutral
+    knob, not an internal QUA variable."""
+    q = _qubit("q1", ops=("x180", "stark"))
+    with pytest.raises(ValueError, match="compensation_amps"):
+        build_program(**_kwargs(compensation=[(q, 2.5)]))
+
+
+def test_guards_fire_before_the_intermediate_frequency_is_read():
+    """Ordering proof: the stubs carry no intermediate_frequency at all, so a
+    refusal that still fires is one that happened before any IF bookkeeping --
+    i.e. before the builder touched the vendor tree."""
+    q = _qubit("q1", ops=("x180",))
+    assert not hasattr(q.xy, "intermediate_frequency")
+    with pytest.raises(ValueError, match="no xy operation"):
+        build_program(**_kwargs(compensation=[(q, 0.3)]))
+
+
+def test_the_tone_reaches_the_program(live_pair):
+    """A compensated build must differ from an uncompensated one, and must carry
+    the frequency shift that makes the tone SHIFT rather than rotate."""
+    from qm import generate_qua_script
+
+    machine, pair = live_pair
+    common = dict(
+        machine=machine,
+        measure_qubits=[pair.qubit_control, pair.qubit_target],
+        swap_pair=pair,
+        swap_operation=SWAP,
+        rounds_array=np.arange(0, 6),
+        coupler_amplitudes=np.linspace(0.0, 0.02, 5),
+        num_shots=10,
+        reset_type="thermal",
+    )
+    if "stark" not in pair.qubit_control.xy.operations:
+        pytest.skip("live control member has no 'stark' xy op (register_stark.py)")
+
+    bare, _ = build_program(**common)
+    toned, _ = build_program(**common,
+                             compensation=[(pair.qubit_control, 0.3)],
+                             stark_detuning_hz=50e6)
+    bare_script = generate_qua_script(bare, machine.generate_config())
+    toned_script = generate_qua_script(toned, machine.generate_config())
+
+    assert toned_script != bare_script
+    assert "update_frequency" in toned_script
+    assert "update_frequency" not in bare_script
