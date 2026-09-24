@@ -24,9 +24,13 @@ scqo_qm.quam_fields, shared with the qualibrate writebacks).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
 import warnings
 from contextlib import contextmanager
+from importlib.metadata import version as _dist_version
 from typing import TYPE_CHECKING, Any
 
 import xarray as xr
@@ -40,15 +44,27 @@ from scqo.device import (
     make_view_base,
 )
 from scqo.entities import Channel, Composite
-from scqo.fieldmap import Unrealized, VendorBinding, VendorOnly
+from scqo.fieldmap import OperatorCommand, Unrealized, VendorBinding, VendorOnly
 
 from scqo_qm import quam_fields
+from scqo_qm._family import (
+    FLUX_OPX_PLUS,
+    RF_EXTERNAL_MIXER,
+    RF_MW_FEM,
+    RF_OCTAVE,
+    rf_chain,
+    tree_families,
+)
+from scqo_qm.backend._power import solve_octave_chain
+from scqo_qm.experiments._coupler_knob import find_coupler_pulse
 from scqo_qm.backend.fieldmap import (
     FIELD_BINDINGS,
     OP_KNOB_BINDINGS,
     OP_KNOB_UNREALIZED,
+    OPERATOR_COMMANDS,
     UNREALIZED,
     VENDOR_ONLY,
+    vendor_only_for,
 )
 
 if TYPE_CHECKING:
@@ -100,11 +116,12 @@ def _preview_refusal(experiment) -> "str | None":
 
 
 #: preview's simulated-waveform window (ns) when --simulate-ns is not given.
-#: Small on purpose: the LF-FEM samples at 2 GS/s, so the html grows 2k
-#: points per ns per port. 20 us shows an active-reset shot from t=0; a
+#: Small on purpose: an LF-FEM samples at up to 2 GS/s, so the html grows 2k
+#: points per ns per port (an OPX+ output is fixed at 1 GS/s -- half the
+#: growth, same reason to keep the window short). 20 us shows an active-reset shot from t=0; a
 #: thermal shot starts with a ms-scale wait, which preview warns about.
 _SIMULATE_DEFAULT_NS = 20_000
-#: hard ceiling for --simulate-ns (400k samples/port at 2 GS/s) — refused by
+#: hard ceiling for --simulate-ns (400k samples/port at the 2 GS/s worst case) — refused by
 #: name above it, because the html and the gateway simulation both scale
 #: linearly with the window.
 _SIMULATE_MAX_NS = 200_000
@@ -115,6 +132,167 @@ _FS_GRID_MIN, _FS_GRID_MAX, _FS_GRID_STEP = -11, 16, 3
 #: The canonical digital operating point: keep the pulse amplitude <= 0.5 full scale
 #: (shared by the readout AND drive chain solves).
 _CANONICAL_MAX_AMP = 0.5
+
+
+#: Why an absolute-power knob is unavailable, per detected RF chain. Two chains
+#: are solved (MW-FEM below, Octave in ``_power``); the rest are refused BY NAME
+#: rather than reaching quam_builder's MW-only power_tools, whose `AttributeError:
+#: no attribute 'opx_output'` names neither the target nor the reason -- and which
+#: `_read_or_none` then swallows into a bare None.
+_POWER_CHAIN_REFUSAL = {
+    RF_EXTERNAL_MIXER: (
+        "is on an external analog mixer, whose power lives on the local "
+        "oscillator's own source -- outside anything this driver can reach. "
+        "Set the amplitude knob (readout_amp / drive_amp) and the LO power by "
+        "hand"),
+    None: (
+        "declares no RF chain in the QUAM tree (neither frequency_converter_up "
+        "nor opx_output.band), so its absolute power cannot be resolved. Check "
+        "the setup's state.json"),
+}
+
+#: The chains whose two-knob power solve this driver owns.
+_SOLVED_POWER_CHAINS = (RF_MW_FEM, RF_OCTAVE)
+
+
+def _power_chain(channel: Any, *, name: str, field: str) -> str:
+    """The channel's RF chain when its power is solvable, else a refusal naming why.
+
+    Absolute power is the one knob family whose vendor home differs per RF chain,
+    so it is also the one that fails WORST when the tree is not the expected one:
+    the MW helpers reach ``channel.opx_output.full_scale_power_dbm``, an Octave
+    channel has no ``opx_output`` at all, and the resulting bare AttributeError is
+    caught by ``_read_or_none`` and reported as ``None`` -- for every qubit, every
+    session, with nothing said. Refusing by name here is what makes that visible.
+    """
+    chain = rf_chain(channel)
+    if chain in _SOLVED_POWER_CHAINS:
+        return chain
+    raise ValueError(f"{name}.{field}: {_POWER_CHAIN_REFUSAL[chain]}")
+
+
+def _read_chain_power(channel: Any, operation: str, *, name: str, field: str,
+                      quantity: str) -> float:
+    """Absolute output power (dBm) of ``channel``'s ``operation``, either chain.
+
+    Both readers are the vendor's: this driver owns the WRITE policy, not the
+    arithmetic, so a get/set round trip cannot drift from what quam_builder (and
+    the vendored qualibrate nodes) would report for the same tree.
+    """
+    chain = _power_chain(channel, name=name, field=field)
+    amp = channel.operations[operation].amplitude
+    if not amp:  # None or 0 -> log10 domain error / -inf must never reach the config
+        raise ValueError(
+            f"{name}: {quantity} amplitude is unset/zero — absolute power undefined")
+    if chain == RF_OCTAVE:
+        from quam_builder.tools.power_tools import get_output_power_iq_channel
+
+        return float(get_output_power_iq_channel(channel, operation))
+    from quam_builder.tools.power_tools import get_output_power_mw_channel
+
+    return float(get_output_power_mw_channel(channel, operation))
+
+
+def _octave_calibration_fingerprint(channel: Any, cache: dict) -> dict | None:
+    """Which mixer calibration was in force for ``channel``, for the run record.
+
+    The Octave's corrections live OUTSIDE ``state.json``, in a
+    ``calibration_db.json`` whose path is itself a QUAM field. So
+    ``vendor_config_snapshot`` -- a pure split of ``to_dict()`` -- cannot capture
+    them, and two runs with byte-identical QUAM state can have been taken with
+    different mixer corrections. Without this the record could not tell them
+    apart, which on an analog up-conversion chain is most of the difference
+    between a clean spectrum and a mirrored one.
+
+    Digest and mtime, never the contents: the file is a cache of measured
+    corrections, not configuration, and a run record is not where it belongs.
+    ``cache`` is per-call, so one feedline's DB is hashed once rather than once
+    per qubit on it.
+    """
+    converter = getattr(channel, "frequency_converter_up", None)
+    octave = getattr(converter, "octave", None)
+    if octave is None:
+        return None
+    declared = getattr(octave, "calibration_db_path", None)
+    folder = os.path.abspath(declared) if declared else os.getcwd()
+    path = os.path.join(folder, "calibration_db.json")
+    if path in cache:
+        return cache[path]
+
+    out: dict[str, Any] = {"path": path, "declared": bool(declared)}
+    try:
+        raw = open(path, "rb").read()
+    except OSError:
+        # Not an error to report here: the file appears when the calibration is
+        # first run, and its ABSENCE is exactly what a later reader wants to see
+        # recorded against a run whose spectra look mirrored.
+        out["present"] = False
+    else:
+        out["present"] = True
+        out["sha16"] = hashlib.sha256(raw).hexdigest()[:16]
+        out["mtime"] = os.path.getmtime(path)
+    cache[path] = out
+    return out
+
+
+def _coarse_power_knob(channel: Any, *, name: str, field: str,
+                       prefix: str) -> dict[str, Any]:
+    """The chain's COARSE power knob, named as that chain names it.
+
+    Run-record provenance has to say what the instrument was actually set to, and
+    the two chains do not share a knob: MW-FEM stages
+    ``full_scale_power_dbm`` (dBm, a 3 dB grid) while an Octave stages
+    ``frequency_converter_up.gain`` (dB, a 0.5 dB grid). Recording the Octave's
+    gain under the MW key would be worse than omitting it -- a reader comparing
+    two runs would silently compare a full scale against a gain.
+    """
+    chain = _power_chain(channel, name=name, field=field)
+    if chain == RF_OCTAVE:
+        return {f"{prefix}octave_gain_db": float(channel.frequency_converter_up.gain)}
+    return {f"{prefix}full_scale_power_dbm": channel.opx_output.full_scale_power_dbm}
+
+
+def _write_chain_power(channel: Any, operation: str, target: float, *,
+                       name: str, field: str) -> None:
+    """Stage ``target`` dBm onto ``channel``'s coarse knob + ``operation`` amplitude.
+
+    The Octave branch does NOT call ``power_tools.set_output_power_iq_channel``.
+    That helper cannot express this driver's policy (it re-derives the gain from a
+    target amplitude every time, which would invalidate the mixer calibration on
+    every set), and its gain-given path is broken outright -- it validates
+    ``max_amplitude``, which is None on that path, so the comparison raises
+    TypeError. It also returns its input rather than the amplitude it computed.
+    The READER beside it is fine and is used above.
+    """
+    chain = _power_chain(channel, name=name, field=field)
+    if chain == RF_OCTAVE:
+        converter = channel.frequency_converter_up
+        solution = solve_octave_chain(
+            target, current_gain_db=converter.gain or 0.0, name=name)
+        if solution.gain_moved:
+            # The operator has to know: the Octave mixer calibration is cached per
+            # (RF output, LO, gain), so this write just invalidated it -- and on a
+            # multiplexed feedline the gain is shared by every channel on that
+            # output, so the move landed on their power too.
+            warnings.warn(
+                f"{name}.{field}: {solution.reason}. The Octave mixer calibration "
+                f"is keyed on the gain, so the cached correction for this RF "
+                f"output is now stale — re-run machine.calibrate_octave_ports(qm) "
+                f"before trusting absolute power. Every channel sharing this "
+                f"Octave RF output moved with it.",
+                RuntimeWarning, stacklevel=3)
+        converter.gain = solution.gain_db
+        channel.operations[operation].amplitude = solution.amplitude_v
+        return
+
+    from quam_builder.tools.power_tools import set_output_power_mw_channel
+
+    # max_amplitude=1: the explicit full_scale_power_dbm already encodes the
+    # <=0.5 policy; the helper then just sets fs + the exact amplitude.
+    set_output_power_mw_channel(
+        channel, target, operation,
+        full_scale_power_dbm=_solve_full_scale(name, target), max_amplitude=1,
+    )
 
 
 def _solve_full_scale(name: str, target: float) -> int:
@@ -135,6 +313,27 @@ def _solve_full_scale(name: str, target: float) -> int:
             f"canonical operating point"
         )
     return int(fs)
+
+
+def split_state_contents(contents: dict, content_mapping: dict[str, str],
+                         default_filename: str) -> dict[str, dict]:
+    """Route a QUAM tree's top-level keys into the files quam's JSONSerialiser
+    would write ({"wiring": "wiring.json", "network": "wiring.json"} on this
+    lab's root); everything unmapped lands in ``default_filename``. Pure: the
+    serialiser's own routing writes inside its loop, so this is the read-only
+    twin the setup snapshot needs. ``contents`` is not modified."""
+    remaining = dict(contents)
+    files: dict[str, dict] = {}
+    for key, fname in content_mapping.items():
+        if key in remaining:
+            files.setdefault(fname, {})[key] = remaining.pop(key)
+    if remaining:
+        files[default_filename] = remaining
+    return files
+
+
+#: the distributions a setup snapshot's manifest records for this backend
+_VERSIONED_DISTRIBUTIONS = ("scqo-qm", "quam", "qm-qua")
 
 
 # ------------------------------------------------------------- channel views
@@ -256,30 +455,18 @@ class QMReadoutChannel(_QMChannelView, make_view_base("readout")):
     # solve needs quam_builder.tools.power_tools, whose module top imports quam —
     # quam_fields is contractually pure (stub-testable without an instrument).
     # backend.py already owns the lazy-vendor-import pattern, so the import stays
-    # inside the accessors.
+    # inside the module-level chain helpers these two delegate to.
     @property
     def readout_power_dbm(self) -> float:
-        from quam_builder.tools.power_tools import get_output_power_mw_channel
-
-        amp = self._vendor.operations[quam_fields.READOUT_OPERATION].amplitude
-        if not amp:  # None or 0 -> log10 domain error / -inf must never reach the config
-            raise ValueError(
-                f"{self.name}: readout amplitude is unset/zero — absolute power undefined"
-            )
-        return float(get_output_power_mw_channel(
-            self._vendor, quam_fields.READOUT_OPERATION))
+        return _read_chain_power(
+            self._vendor, quam_fields.READOUT_OPERATION,
+            name=self.name, field="readout_power_dbm", quantity="readout")
 
     @readout_power_dbm.setter
     def readout_power_dbm(self, value: float) -> None:
-        from quam_builder.tools.power_tools import set_output_power_mw_channel
-
-        target = float(value)
-        # max_amplitude=1: the explicit full_scale_power_dbm already encodes the
-        # <=0.5 policy; the helper then just sets fs + the exact amplitude.
-        set_output_power_mw_channel(
-            self._vendor, target, quam_fields.READOUT_OPERATION,
-            full_scale_power_dbm=_solve_full_scale(self.name, target), max_amplitude=1,
-        )
+        _write_chain_power(
+            self._vendor, quam_fields.READOUT_OPERATION, float(value),
+            name=self.name, field="readout_power_dbm")
 
 
 class QMDriveChannel(_QMChannelView, make_view_base("drive")):
@@ -369,25 +556,15 @@ class QMDriveChannel(_QMChannelView, make_view_base("drive")):
 
     @property
     def drive_power_dbm(self) -> float:
-        from quam_builder.tools.power_tools import get_output_power_mw_channel
-
-        amp = self._vendor.operations[quam_fields.SATURATION_OPERATION].amplitude
-        if not amp:  # None or 0 -> log10 domain error / -inf must never reach the config
-            raise ValueError(
-                f"{self.name}: saturation amplitude is unset/zero — absolute power undefined"
-            )
-        return float(get_output_power_mw_channel(
-            self._vendor, quam_fields.SATURATION_OPERATION))
+        return _read_chain_power(
+            self._vendor, quam_fields.SATURATION_OPERATION,
+            name=self.name, field="drive_power_dbm", quantity="saturation")
 
     @drive_power_dbm.setter
     def drive_power_dbm(self, value: float) -> None:
-        from quam_builder.tools.power_tools import set_output_power_mw_channel
-
-        target = float(value)
-        set_output_power_mw_channel(
-            self._vendor, target, quam_fields.SATURATION_OPERATION,
-            full_scale_power_dbm=_solve_full_scale(self.name, target), max_amplitude=1,
-        )
+        _write_chain_power(
+            self._vendor, quam_fields.SATURATION_OPERATION, float(value),
+            name=self.name, field="drive_power_dbm")
 
 
 class QMFluxChannel(_QMChannelView, make_view_base("flux")):
@@ -567,7 +744,7 @@ class QMQubitPair(CompositeView):
         self._unrealized(suffix, field)
         macro = self._macro(op)
         if suffix == "coupler_flux":
-            pulse = getattr(macro, "coupler_flux_pulse", None)
+            pulse = find_coupler_pulse(macro, getattr(self._qp, 'coupler', None))
             if pulse is None:  # fixed coupler: the gate plays no coupler pulse
                 return None
             amp = getattr(pulse, "amplitude", None)
@@ -583,10 +760,10 @@ class QMQubitPair(CompositeView):
         self._unrealized(suffix, field)
         macro = self._macro(op)
         if suffix == "coupler_flux":
-            pulse = getattr(macro, "coupler_flux_pulse", None)
+            pulse = find_coupler_pulse(macro, getattr(self._qp, 'coupler', None))
             if pulse is None:
                 raise KeyError(
-                    f"{self.name}.{field}: macro {op!r} has no coupler_flux_pulse "
+                    f"{self.name}.{field}: macro {op!r} plays no coupler pulse "
                     f"(a fixed-coupler gate) — nothing realizes a coupler "
                     f"operating point for it")
             pulse.amplitude = float(value)
@@ -856,11 +1033,19 @@ def _progress_shot_total(experiment: "Experiment") -> int:
     return int(total)
 
 
+#: How long ``qm_session`` waits for the cluster's locks to free before it gives up (s).
+#: While a neighbour's job -- or a dead session -- still holds them, every open fails with
+#: "Resources already locked" and qualang_tools polls until this budget runs out. 5 minutes
+#: outlasts a typical neighbouring run; past that the holder is usually dead and wants
+#: `python -m scqo_qm.backend.close_qm`, not more waiting.
+_QM_SESSION_TIMEOUT_S = 300
+
+
 class QMBackend(Backend):
     """scqo Backend over a Quantum Machines OPX (via QUAM + the fused experiment builders)."""
 
     def __init__(self, machine: Any, *, roster: "Roster",
-                 timeout: float = 120) -> None:
+                 timeout: float = _QM_SESSION_TIMEOUT_S) -> None:
         self._machine = machine
         self._roster = roster
         self._device = QMDeviceModel(machine, roster)
@@ -868,7 +1053,7 @@ class QMBackend(Backend):
 
     @classmethod
     def load(cls, *, roster: "Roster", state_path: str | None = None,
-             timeout: float = 120) -> "QMBackend":
+             timeout: float = _QM_SESSION_TIMEOUT_S) -> "QMBackend":
         """Construct from a QUAM state. ``state_path`` overrides ``QUAM_STATE_PATH``;
         when omitted the env / default configuration is used."""
         import os
@@ -915,8 +1100,57 @@ class QMBackend(Backend):
         return dict(OP_KNOB_BINDINGS), dict(OP_KNOB_UNREALIZED)
 
     def vendor_only(self) -> dict[str, VendorOnly]:
-        """QM-unique calibration knobs, vendor-owned (see fieldmap)."""
-        return dict(VENDOR_ONLY)
+        """QM-unique calibration knobs, vendor-owned (see fieldmap), for THIS tree.
+
+        Filtered by the RF chains the loaded tree actually declares. ``scqo state
+        --fields`` is the only place an operator DISCOVERS these knobs, so
+        listing an MW-FEM ``band`` to someone running an Octave names a
+        state.json key their instrument does not have -- and hiding the Octave's
+        gain from them hides the knob that realizes their readout power.
+
+        Degrades to the COMPLETE inventory when there is no tree to inspect: the
+        question "what does this driver know about" still has an answer, and it
+        is a better one than an empty dict.
+        """
+        machine = getattr(self, "_machine", None)
+        if machine is None:
+            return dict(VENDOR_ONLY)
+        return vendor_only_for(tree_families(machine)["rf_chain"])
+
+    def operator_commands(self) -> tuple[OperatorCommand, ...]:
+        """This driver's vendor operator CLIs (see fieldmap) — the other half of
+        "what can I reach on THIS instrument that is not a scqo command".
+
+        Scoped to what this tree can actually reach, because an inventory whose
+        whole purpose is DISCOVERY must not advertise a door that is walled up.
+        Two commands are chain-specific:
+
+        * ``apply_distortion`` writes an LF-FEM ``exponential_filter``. On a tree
+          whose flux lines are all OPX+ analog outputs there is no such field, so
+          it can only refuse. A tree with no flux at all, or with any LF-FEM
+          line, keeps it.
+        * ``calibrate_octave`` calibrates an analog up-conversion mixer. A tree
+          with no Octave has no mixer, and the vendor call would raise naming the
+          element rather than the reason.
+
+        The tuple is otherwise returned as-is, unlike ``vendor_only``'s defensive
+        ``dict()``: a tuple of frozen dataclasses is already immutable, and
+        keeping the same object keeps the tests' unbound equality check exact
+        whenever the whole tuple is served.
+        """
+        machine = getattr(self, "_machine", None)
+        if machine is None:
+            return OPERATOR_COMMANDS
+        families = tree_families(machine)
+        hidden: set[str] = set()
+        flux = set(families["flux_port"])
+        if flux and flux <= {FLUX_OPX_PLUS}:
+            hidden.add("apply_distortion")
+        if RF_OCTAVE not in families["rf_chain"]:
+            hidden.add("calibrate_octave")
+        if not hidden:
+            return OPERATOR_COMMANDS
+        return tuple(c for c in OPERATOR_COMMANDS if c.name not in hidden)
 
     def _drive_views(self, targets: list[str]) -> dict[str, EntityView]:
         """Every run target's DEFAULT drive view, keyed by channel name.
@@ -1003,54 +1237,122 @@ class QMBackend(Backend):
         run = f" --run {run_id}" if run_id else ""
         return f"python -m scqo_qm.backend.apply_distortion --target {target}{run}"
 
+    def vendor_config_snapshot(self) -> dict[str, str]:
+        """The QUAM tree as held in memory, as the files ``machine.save()`` would
+        write: ``{"state.json": text, "wiring.json": text}`` (scqo's setup snapshot,
+        stored per run under ``<device>/setup_snapshots/``).
+
+        Same ``to_dict(include_defaults=...)`` the serialiser resolves, split by its
+        ``content_mapping`` (:func:`split_state_contents`), dumped with the same
+        ``indent=4, ensure_ascii=False``; LF newlines and a trailing newline, so the
+        text parses equal to the on-disk file (which quam writes CRLF, no trailing
+        newline; in-memory tuples read back as lists). Provenance only: never writes,
+        never touches the instrument, and degrades to ``{}`` on any failure.
+        """
+        try:
+            machine = self._machine
+            ser = machine.serialiser
+            contents = machine.to_dict(include_defaults=ser._resolve_include_defaults())
+            parts = split_state_contents(contents, dict(ser.content_mapping or {}),
+                                         ser.default_filename)
+            return {name: json.dumps(part, indent=4, ensure_ascii=False) + "\n"
+                    for name, part in parts.items()}
+        except Exception:  # provenance must never fail a run
+            return {}
+
+    def versions(self) -> dict[str, str]:
+        """``{distribution: version}`` of this driver and its vendor libs, stamped
+        into the setup snapshot's manifest: a QUAM state names its classes by dotted
+        path, so a later ``scqo restore`` warns when these moved."""
+        out: dict[str, str] = {}
+        for name in _VERSIONED_DISTRIBUTIONS:
+            try:
+                out[name] = _dist_version(name)
+            except Exception:  # not installed here
+                continue
+        return out
+
     def power_context(self, qubits: list[str]) -> dict:
         """Raw readout + drive chain values per qubit (run-record provenance only).
 
         Addressed by MODE name (``params.targets``): each target's default readout
         and drive channels are resolved through the roster, so the two blocks stay
         independent — a qubit without a saturation op still reports its readout chain.
+
+        Two different empties, kept apart on purpose. A name the roster does not
+        serve records ``{}`` — there is no chain, so there is nothing to say. A name
+        that DOES resolve but whose chain cannot answer records the reason instead,
+        because a bare ``{}`` there is indistinguishable from the first case, and
+        that is precisely what an Octave tree used to write for every qubit of every
+        run: provenance that never failed and never said anything either.
         """
-        from quam_builder.tools.power_tools import get_output_power_mw_channel
+        cal_cache: dict = {}
+
+        def view_or_none(name: str, kind: str):
+            """The target's default channel view, or None when it serves no such one."""
+            try:
+                return self._default_view(name, kind)
+            except Exception:
+                return None
 
         out: dict = {}
         for name in qubits:
             out[name] = {}
+            readout_view = view_or_none(name, "readout")
             try:
-                view = self._default_view(name, "readout")
-                resonator = view.vendor
+                if readout_view is None:
+                    raise LookupError("no readout channel for this target")
+                resonator = readout_view.vendor
                 ro = resonator.operations[quam_fields.READOUT_OPERATION]
+                # Amplitude and LO FIRST, and the chain-dependent dBm after: the
+                # chain-independent half of the provenance must survive a chain
+                # this driver cannot price. (QUAM resolves LO_frequency to the
+                # port's upconverter_frequency on MW, to the Octave's own LO on
+                # IQ — a hand-edited LO is otherwise invisible in provenance.)
                 out[name] = {
-                    "full_scale_power_dbm": resonator.opx_output.full_scale_power_dbm,
                     "readout_amplitude": float(ro.amplitude),
-                    "readout_power_dbm": float(get_output_power_mw_channel(
-                        resonator, quam_fields.READOUT_OPERATION)),
+                    # WHICH chain, always — it is what makes the rest of this
+                    # block legible: "full_scale_power_dbm missing" reads as a
+                    # fault on an MW run and as the plain truth on an Octave one.
+                    "readout_rf_chain": rf_chain(resonator) or "unknown",
                 }
-                # The readout LO the data was taken at (QUAM resolves LO_frequency
-                # to the port's upconverter_frequency): a hand-edited LO is
-                # otherwise invisible in provenance. Only when the channel has one
-                # (an LF-FEM resonator does not).
                 lo = getattr(resonator, "LO_frequency", None)
                 if lo is not None:
                     out[name]["readout_lo_freq_hz"] = float(lo)
-            except Exception:  # provenance must never fail a run
+                out[name].update(_coarse_power_knob(
+                    resonator, name=name, field="readout_power_dbm", prefix=""))
+                fingerprint = _octave_calibration_fingerprint(resonator, cal_cache)
+                if fingerprint is not None:
+                    out[name]["octave_calibration_db"] = fingerprint
+                out[name]["readout_power_dbm"] = _read_chain_power(
+                    resonator, quam_fields.READOUT_OPERATION, name=name,
+                    field="readout_power_dbm", quantity="readout")
+            except LookupError:  # no such channel — nothing to report, not a fault
                 out[name] = {}
+            except Exception as exc:  # provenance must never fail a run
+                out[name]["readout_unavailable"] = f"{type(exc).__name__}: {exc}"
             # The drive chain behind drive_power_dbm — same never-fail rule, and
             # independent of the readout block.
+            drive_view = view_or_none(name, "drive")
             try:
-                view = self._default_view(name, "drive")
-                xy = view.vendor
+                if drive_view is None:
+                    raise LookupError("no drive channel for this target")
+                xy = drive_view.vendor
                 sat = xy.operations[quam_fields.SATURATION_OPERATION]
-                out[name].update({
-                    "drive_full_scale_power_dbm": xy.opx_output.full_scale_power_dbm,
-                    "saturation_amp": float(sat.amplitude),
-                    "drive_power_dbm": float(get_output_power_mw_channel(
-                        xy, quam_fields.SATURATION_OPERATION)),
-                })
+                out[name]["saturation_amp"] = float(sat.amplitude)
+                out[name]["drive_rf_chain"] = rf_chain(xy) or "unknown"
                 lo = getattr(xy, "LO_frequency", None)
                 if lo is not None:
                     out[name]["drive_lo_freq_hz"] = float(lo)
-            except Exception:  # provenance must never fail a run
+                out[name].update(_coarse_power_knob(
+                    xy, name=name, field="drive_power_dbm", prefix="drive_"))
+                out[name]["drive_power_dbm"] = _read_chain_power(
+                    xy, quam_fields.SATURATION_OPERATION, name=name,
+                    field="drive_power_dbm", quantity="saturation")
+            except LookupError:  # no such channel — nothing to report, not a fault
                 pass
+            except Exception as exc:  # provenance must never fail a run
+                out[name]["drive_unavailable"] = f"{type(exc).__name__}: {exc}"
         return out
 
     def acquire(self, experiment: "Experiment") -> xr.Dataset:

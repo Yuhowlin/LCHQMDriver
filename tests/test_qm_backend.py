@@ -15,6 +15,8 @@ Three tiers:
 from pathlib import Path
 from types import SimpleNamespace
 
+import re
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -245,15 +247,15 @@ def test_flux_channel_serves_both_vendor_shapes(backend, stub_machine):
 
 def test_channel_views_round_trip_the_neutral_knobs(backend, stub_machine):
     """Neutral get/set maps onto QUAM through scqo_qm.quam_fields; a
-    drive_freq_hz write shifts both f_01 and xy.RF_frequency."""
+    drive_freq_hz write lands ONE absolute value on both f_01 and
+    xy.RF_frequency (scqo reads the first, the drive line plays the second)."""
     q2 = stub_machine.qubits["q2"]
     xy = backend.device.component("q2_xy")
     ro = backend.device.component("q2_ro")
 
-    rf0 = float(q2.xy.RF_frequency)
     xy.drive_freq_hz = 5.102e9
     assert float(q2.f_01) == pytest.approx(5.102e9)
-    assert float(q2.xy.RF_frequency) == pytest.approx(rf0 + 2e6)
+    assert float(q2.xy.RF_frequency) == pytest.approx(5.102e9)
 
     xy.pi_amp = 0.123
     assert xy.pi_amp == pytest.approx(0.123)
@@ -384,6 +386,56 @@ def test_composite_view_reads_and_writes_the_gate_knobs(backend, stub_machine):
     assert pair.read_knob("cz_vz_low_rad") == pytest.approx(-np.pi / 2)
 
 
+def test_coupler_flux_resolves_the_lab_iswap_macro_shape(backend, stub_machine):
+    """The knob must find its coupler pulse on the shape the LAB actually runs.
+
+    Every pair macro in the live quam_state is an ISwapImplementation, which
+    declares no `coupler_flux_pulse` at all — it names ONE flux_pulse played on
+    both the control's z line and the coupler, so the coupler's own copy of that
+    pulse is the operating point. The binding used to look only for
+    `macro.coupler_flux_pulse`, so on the real chip this knob read None for every
+    pair (reported as 'fixed coupler', which is false — the macro does play one)
+    and every write raised KeyError. The CZ-only stub is what hid it.
+    """
+    pair_qp = stub_machine.qubit_pairs["coupler_q1_q2"]
+    stored = pair_qp.coupler.operations["swap_flattop"]
+    pair = backend.device.component("q1_q2")
+
+    assert pair.read_knob("iswap_coupler_flux") == pytest.approx(0.081)
+    pair.write_knob("iswap_coupler_flux", 0.15)
+    assert stored.amplitude == pytest.approx(0.15)      # the COUPLER's pulse moved
+    assert pair.read_knob("iswap_coupler_flux") == pytest.approx(0.15)
+
+    # the two shapes stay independent: writing one must not touch the other
+    assert pair.read_knob("cz_coupler_flux") == pytest.approx(-0.125)
+
+
+def test_coupler_flux_reads_none_only_for_a_genuinely_fixed_coupler(backend, stub_machine):
+    """`coupler_flux_pulse = None` means the gate plays no coupler pulse, and
+    that is the ONLY case that reads None. A macro of an unfamiliar shape must
+    not be silently reported as fixed-coupler — that misreads the device."""
+    macros = stub_machine.qubit_pairs["coupler_q1_q2"].macros
+    pair = backend.device.component("q1_q2")
+
+    macros["CZ"].coupler_flux_pulse = None       # declared, and empty
+    assert pair.read_knob("cz_coupler_flux") is None
+    with pytest.raises(KeyError, match="plays no coupler pulse"):
+        pair.write_knob("cz_coupler_flux", 0.1)
+
+    # ...while the iswap-shaped macro beside it still resolves
+    assert pair.read_knob("iswap_coupler_flux") == pytest.approx(0.081)
+
+
+def test_the_stub_carries_both_macro_shapes(stub_machine):
+    """A regression guard on the FIXTURE, because the fixture is what hid the
+    bug: a stub that only ever carries the vendor CZ shape lets the binding pass
+    while being wrong for every pair on the lab's own chip."""
+    macros = stub_machine.qubit_pairs["coupler_q1_q2"].macros
+    assert hasattr(macros["CZ"], "coupler_flux_pulse"), "lost the vendor CZGate shape"
+    assert not hasattr(macros["iswap"], "coupler_flux_pulse"),         "the iswap stub must NOT declare coupler_flux_pulse — that is the point"
+    assert isinstance(macros["iswap"].flux_pulse, str)
+
+
 def test_composite_view_refuses_undeclared_and_unrealized_knobs(backend):
     """Exact-cause errors: an undeclared operation names the declared set, a
     non-knob name names the legal suffixes, and a suffix QM cannot realize
@@ -391,7 +443,7 @@ def test_composite_view_refuses_undeclared_and_unrealized_knobs(backend):
     pair = backend.device.component("q1_q2")
 
     with pytest.raises(KeyError, match="not declared on this composite"):
-        pair.read_knob("iswap_coupler_flux")
+        pair.read_knob("cnot_coupler_flux")   # cz and iswap are declared; cnot is not
     with pytest.raises(KeyError, match="not a per-operation knob"):
         pair.read_knob("coupler_flux")
     with pytest.raises(NotImplementedError, match="FLUX-activated"):
@@ -898,6 +950,52 @@ def test_preview_simulate_ns_cap_refuses(machine, live_roster, tmp_path):
     assert not (tmp_path / "prev").exists()
 
 
+def test_vendor_config_snapshot_matches_the_state_files(machine):
+    """The setup snapshot IS what machine.save() would write: the same split, and
+    parsed-equal to the repo's quam_state files (quam writes CRLF and no trailing
+    newline, and in-memory tuples read back as lists - so compare parsed JSON, not
+    bytes). Deterministic across calls, so the content hash is stable."""
+    import json
+
+    from scqo_qm.backend.qm_backend import QMBackend
+
+    backend = QMBackend(machine, roster=None)
+    snap = backend.vendor_config_snapshot()
+    assert set(snap) == {"state.json", "wiring.json"}
+    state_dir = Path(__file__).resolve().parents[1] / "quam_state"
+    for name, text in snap.items():
+        assert text.endswith("\n") and "\r" not in text
+        assert json.loads(text) == json.loads((state_dir / name).read_text(encoding="utf-8")), name
+    assert set(json.loads(snap["wiring.json"])) == {"wiring", "network"}
+    assert backend.vendor_config_snapshot() == snap  # byte-identical on a second call
+    assert "scqo-qm" in backend.versions()
+
+
+def test_drag_equator_restores_alpha_when_the_build_fails(machine, monkeypatch):
+    """The install/restore of ref_alpha now sits in a try/finally: a failing
+    generate_config() must leave the stored DRAG alphas exactly where they were
+    (a leaked ref_alpha would be persisted by the next machine.save())."""
+    from scqo_qm import quam_fields
+    from scqo_qm.experiments import qubit_drag_equator as drag_equator_probe
+    from scqo_qm.experiments._lib import select_qubits
+
+    names = ["q4", "q5"]
+    qubits = select_qubits(machine, names, multiplexed=True)
+    before = {q: quam_fields.get_drag_beta(machine.qubits[q], operation="x180") for q in names}
+
+    def _boom(self):
+        raise RuntimeError("config generation exploded")
+
+    monkeypatch.setattr(type(machine), "generate_config", _boom)
+    with pytest.raises(RuntimeError, match="exploded"):
+        drag_equator_probe.build_program(
+            machine, qubits, num_shots=10, beta_array=[-0.2, 0.0, 0.2],
+            pulse_repetitions=3, reset_type="thermal",
+            use_state_discrimination=False, target_gate="x180")
+    after = {q: quam_fields.get_drag_beta(machine.qubits[q], operation="x180") for q in names}
+    assert after == pytest.approx(before)
+
+
 @pytest.mark.parametrize("gate", ["x180", "x90"])
 def test_gate_target_probes_build_for_both_gates(machine, gate):
     """Issue #24: the drag-equator probe died with a TypeError (stale ``lock_x90``
@@ -1179,6 +1277,81 @@ def test_swap_chevron_probe_builds_against_the_baked_config(machine, live_roster
     assert float(captured["sweep_axes"]["flux_amp_v"].values.max()) == pytest.approx(0.05)
 
     assert generate_qua_script(captured["prog"], captured["config"])
+
+
+def _chevron_script(machine, live_roster, monkeypatch, **params):
+    """Build the chevron against the LIVE tree and return (qua script, exp)."""
+    from qm import generate_qua_script
+
+    from scqo_qm.experiments import pair_swap_chevron as chevron_probe
+    from scqo_qm.experiments.pair_swap_chevron import QMPairSwapChevron
+
+    captured = {}
+
+    def fake_acquire(m, prog, sweep_axes, *, num_shots, timeout, log=None, config=None):
+        captured.update(prog=prog, config=config)
+        return xr.Dataset()
+
+    monkeypatch.setattr(chevron_probe, "acquire", fake_acquire)
+    exp = _swap_experiment(QMPairSwapChevron, machine, live_roster,
+                           min_flux_amp_v=0.0, max_flux_amp_v=0.05, num_amp_points=5,
+                           max_swap_time_ns=40.0, num_time_points=6,
+                           num_averages=10, **params)
+    exp.sweep_axes = exp.define_sweep()
+    exp.probe()
+    # the PROGRAM only: with the config attached, every pulse name in the tree
+    # appears in the dump and no assertion about what is PLAYED can be made
+    assert generate_qua_script(captured["prog"], captured["config"]), "must compile"
+    return generate_qua_script(captured["prog"]), exp, captured
+
+
+def test_swap_chevron_plays_the_macros_coupler_pulse_when_asked(machine, live_roster,
+                                                                monkeypatch):
+    """The QCQ path: the coupler carries the named macro's own pulse for the same
+    window, so the arch is the one that pair has AT that coupler amplitude. The
+    live tree's `partial_swap` names a SHAPED coupler pulse (refused — see the
+    test below), so point it at a square one first; that is a config fact, not a
+    property of the probe."""
+    _target, qp = _live_pair(machine)
+    monkeypatch.setattr(qp.macros["partial_swap"], "flux_pulse", "swap_01_10_square")
+
+    free, _exp, _cap = _chevron_script(machine, live_roster, monkeypatch)
+    coupled, exp, captured = _chevron_script(
+        machine, live_roster, monkeypatch, coupler_flux_v=0.1)
+
+    # DIFFERENTIAL: the coupler play appears only when it was asked for. Match
+    # the PULSE name, not the element's: QM names its pairs after the coupler,
+    # so the bare element name already occurs in a coupler-free script.
+    assert "swap_01_10_square" not in free
+    assert "swap_01_10_square" in coupled
+    plays = [ln.strip() for ln in coupled.splitlines() if "swap_01_10_square" in ln]
+    assert len(plays) == 1, plays
+    # ON the coupler element, STRETCHED (not its native length), and rescaled by
+    # its own stored amplitude — 0.1 V asked for / 0.25 V stored. That divisor is
+    # the whole point: it is the one ISwapImplementation.apply uses, so this
+    # number is what swap_coupler_flux wants on the chain.
+    assert f'"{qp.coupler.name}"' in plays[0], plays[0]
+    assert "duration=" in plays[0], plays[0]
+    assert "amp(0.4)" in plays[0], plays[0]
+
+    # the bakes are SKIPPED on this path — a baked segment plays one element, so
+    # the coupler could not stay sample-aligned with it and the axis is on the
+    # 4 ns clock instead. Nothing to add to the config, so nothing is added.
+    assert not set(captured["config"]["pulses"]) - set(machine.generate_config()["pulses"])
+    axis = exp.sweep_axes["swap_time_ns"]
+    assert axis.min() >= 16.0 and not np.any(np.round(axis).astype(int) % 4)
+
+
+def test_swap_chevron_refuses_a_shaped_coupler_pulse_on_the_live_tree(machine,
+                                                                      live_roster,
+                                                                      monkeypatch):
+    """`partial_swap` on the live pair names `flattop_cosine`, and a raised
+    cosine ZERO-PADS under a duration override instead of stretching — so it
+    would play its native length inside every window. Refused by name, with the
+    class in the message."""
+    with pytest.raises(ValueError) as err:
+        _chevron_script(machine, live_roster, monkeypatch, coupler_flux_v=0.1)
+    assert "FlatTopCosinePulse" in str(err.value)
 
 
 def test_xyz_delay_probe_builds_against_the_baked_config(machine, live_roster,
@@ -1554,3 +1727,29 @@ def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
     finally:
         pulse.threshold, pulse.rus_exit_threshold = saved
         qubit.resonator.confusion_matrix = saved_cm
+
+
+# ------------------------------------------------------- setup snapshot (stub)
+
+def test_split_state_contents_routes_mapped_keys():
+    """The pure twin of quam's JSONSerialiser routing: mapped top-level keys go
+    to their file, everything else to the default file; the input is untouched."""
+    from scqo_qm.backend.qm_backend import split_state_contents
+
+    contents = {"qubits": {"q1": 1}, "wiring": {"w": 1}, "network": {"host": "x"},
+                "__class__": "lab.Quam"}
+    mapping = {"wiring": "wiring.json", "network": "wiring.json"}
+    parts = split_state_contents(contents, mapping, "state.json")
+    assert set(parts) == {"state.json", "wiring.json"}
+    assert parts["wiring.json"] == {"wiring": {"w": 1}, "network": {"host": "x"}}
+    assert parts["state.json"] == {"qubits": {"q1": 1}, "__class__": "lab.Quam"}
+    assert set(contents) == {"qubits", "wiring", "network", "__class__"}  # not mutated
+    assert split_state_contents({"a": 1}, {}, "state.json") == {"state.json": {"a": 1}}
+    assert split_state_contents({"wiring": {}}, mapping, "state.json") == {"wiring.json": {"wiring": {}}}
+
+
+def test_vendor_config_snapshot_degrades_on_the_stub(backend):
+    """A tree without a serialiser (the stub) yields no snapshot and never raises
+    - the power_context rule; versions() still names the driver."""
+    assert backend.vendor_config_snapshot() == {}
+    assert "scqo-qm" in backend.versions()

@@ -12,6 +12,7 @@ __pycache__
 **/quam_state
 state_lib/
 assets
+# No repo-local venv belongs here - the tests run in the shared .venv-qm (ENVIRONMENTS.md).
 .venv*
 **/calibration_data
 /.img
@@ -24,3 +25,7 @@ temp/
 # update upstream and re-run `python sync_official.py`.
 **/quam_state_6q
 scqo_preview/
+# The OPX+/Octave tree is BUILT, not stored: scripts/make_opxp_fixture.py
+# is the tracked artifact, and the tests build into a tmp dir so a fresh
+# clone needs no local state at all.
+**/quam_state_opxp

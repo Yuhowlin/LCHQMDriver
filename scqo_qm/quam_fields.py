@@ -1,13 +1,14 @@
 """Neutral QUAM field accessors — the single place that knows how SCQO's neutral
 calibration fields map onto QUAM attribute paths.
 
-Both call sites write through these primitives, so the
-``f_01`` / ``resonator.RF_frequency`` / ``xy.operations['x180'].amplitude`` mapping is
-defined exactly once:
-
-* the scqo backend's CHANNEL views (``scqo_qm/backend/qm_backend.py``:
-  ``QMDriveChannel`` / ``QMReadoutChannel`` / ``QMFluxChannel``) — neutral get/set;
-* the qualibrate ``apply_update`` writebacks (``customized/node/LCH_*/update.py``).
+The scqo backend's CHANNEL views (``scqo_qm/backend/qm_backend.py``:
+``QMDriveChannel`` / ``QMReadoutChannel`` / ``QMFluxChannel``) do every neutral
+get/set through these primitives, so the ``f_01`` / ``resonator.RF_frequency`` /
+``xy.operations['x180'].amplitude`` mapping is defined exactly once. (The retired
+LCH qualibrate shells were the second caller; the vendored official nodes write
+QUAM directly and never import this module.) The whole-tree audits
+(``flux_point_problems`` / ``flux_headroom_*`` / ``drive_frequency_problems``) are
+the same knowledge applied once at session construction by ``scqo_backend.py``.
 
 Pure attribute access on a passed QUAM ``qubit``: no qm/quam import here, so this stays
 importable without an instrument (and unit-testable with a stub qubit).
@@ -15,7 +16,9 @@ importable without an instrument (and unit-testable with a stub qubit).
 Neutral field -> QUAM path (the neutral names are the greenfield ones; which CHANNEL
 entity owns each is in scqo_qm/backend/fieldmap.py, keyed by channel KIND)
     readout_freq_hz       <-> q.resonator.RF_frequency  (and q.resonator.f_01 when present)
-    drive_freq_hz         <-> q.f_01                     (and q.xy.RF_frequency, kept in step)
+    drive_freq_hz         <-> q.f_01 and q.xy.RF_frequency (both written to the same
+                              absolute value; drive_frequency_problems refuses a tree
+                              where they differ)
     pi_amp                <-> q.xy.operations['x180'].amplitude
     pi_duration_s         <-> q.xy.operations['x180'].length (s <-> ns, 4 ns grid)
     drive_amp             <-> q.xy.operations['saturation'].amplitude
@@ -32,7 +35,17 @@ entity owns each is in scqo_qm/backend/fieldmap.py, keyed by channel KIND)
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+from scqo_qm._family import RF_OCTAVE, rf_chain
+from scqo_qm._octave import (
+    LO_TOLERANCE_HZ,
+    SYNTH_OUTPUTS,
+    if_window_problem,
+    lo_grid_problem,
+    synth_of_rf_output,
+)
 
 #: The operation whose amplitude is the calibrated pi pulse (the neutral ``pi_amp``).
 PI_OPERATION = "x180"
@@ -52,38 +65,22 @@ def set_readout_freq(qubit: Any, value: float) -> None:
         qubit.resonator.f_01 = value
 
 
-def shift_readout_freq(qubit: Any, delta: float) -> None:
-    """Shift only the resonator RF frequency by ``delta`` Hz."""
-    qubit.resonator.RF_frequency = float(qubit.resonator.RF_frequency) + float(delta)
-
-
 # ----------------------------------------------------------------------- drive (f_01)
 def get_drive_freq(qubit: Any) -> float:
     return float(qubit.f_01)
 
 
-def _seed_f01_if_unset(qubit: Any) -> None:
-    """An uncalibrated qubit has ``f_01`` unset (None) while its drive RF is always known;
-    on resonance the two coincide, so seed ``f_01`` from the drive RF before shifting."""
-    if qubit.f_01 is None:
-        qubit.f_01 = float(qubit.xy.RF_frequency)
-
-
 def set_drive_freq(qubit: Any, value: float) -> None:
-    """Set ``f_01`` to an absolute Hz and shift the xy drive RF by the same delta, so the
-    fixed ``f_01`` <-> RF offset is preserved."""
-    _seed_f01_if_unset(qubit)
-    delta = float(value) - float(qubit.f_01)
-    qubit.f_01 = float(value)
-    qubit.xy.RF_frequency = float(qubit.xy.RF_frequency) + delta
-
-
-def shift_drive_freq(qubit: Any, delta: float) -> None:
-    """Shift both ``f_01`` and the xy drive RF by ``delta`` Hz (keeps them in step)."""
-    _seed_f01_if_unset(qubit)
-    delta = float(delta)
-    qubit.f_01 = float(qubit.f_01) + delta
-    qubit.xy.RF_frequency = float(qubit.xy.RF_frequency) + delta
+    """Set the drive frequency to an absolute Hz on BOTH stores: ``f_01`` (what
+    scqo reads back as drive_freq_hz) and ``xy.RF_frequency`` (what the drive
+    line plays - QUAM derives intermediate_frequency = RF - LO from it, and every
+    probe's update_frequency starts there). The official nodes write the pair the
+    same way, and :func:`drive_frequency_problems` refuses a tree where they
+    disagree, so a mismatched tree is REPAIRED by the first write rather than
+    carried along as a fixed offset (the old delta semantics)."""
+    value = float(value)
+    qubit.f_01 = value
+    qubit.xy.RF_frequency = value
 
 
 # ---------------------------------------------------------------------- readout amplitude
@@ -326,6 +323,280 @@ def flux_point_problems(machine: Any) -> list[str]:
     return problems
 
 
+# ------------------------------------------------------------ drive frequency
+#: How far ``f_01`` and ``xy.RF_frequency`` may drift before the drive audit
+#: refuses. ulp noise at 5 GHz is ~1e-6 Hz and a hand edit is kHz or more, so
+#: 1 Hz separates float echo from a real disagreement with room to spare.
+DRIVE_FREQ_TOLERANCE_HZ = 1.0
+
+
+def _finite_hz(value: Any):
+    """``value`` as a finite float, or None when the tree cannot answer: unset
+    (None), a ``#``-reference that did not resolve (QUAM hands back the string),
+    NaN or inf."""
+    try:
+        hz = float(value)
+    except (TypeError, ValueError):
+        return None
+    return hz if math.isfinite(hz) else None
+
+
+def drive_frequency_problems(machine: Any) -> list[str]:
+    """Every qubit whose ``f_01`` and ``xy.RF_frequency`` disagree.
+
+    scqo's ``drive_freq_hz`` READS ``f_01`` while the drive line PLAYS
+    ``xy.RF_frequency`` (QUAM's ``intermediate_frequency = RF - LO`` feeds every
+    probe's ``update_frequency``), so a tree carrying two different numbers makes
+    the knob report a frequency the hardware never emits. ``set_drive_freq``
+    writes both and the official nodes write both; a hand edit of one, or a node
+    that moves only the RF, is the remaining way in - which is why this is a
+    startup audit rather than a setter check.
+
+    Skips what it cannot judge: no ``xy`` (nothing plays), ``f_01`` None (an
+    uncalibrated qubit - legitimate on a real state file), or an RF that is not
+    a finite number. Pure (no I/O, no QUA); the caller decides how loudly to
+    fail. Empty list = compliant.
+    """
+    problems: list[str] = []
+    for name, qubit in getattr(machine, "qubits", {}).items():
+        xy = getattr(qubit, "xy", None)
+        if xy is None:
+            continue
+        f01 = _finite_hz(getattr(qubit, "f_01", None))
+        rf = _finite_hz(getattr(xy, "RF_frequency", None))
+        if f01 is None or rf is None:
+            continue  # cannot determine - never an accusation
+        if abs(f01 - rf) > DRIVE_FREQ_TOLERANCE_HZ:
+            problems.append(
+                f"qubits.{name}.f_01 = {f01} Hz but qubits.{name}.xy.RF_frequency = "
+                f"{rf} Hz (differ by {abs(f01 - rf)} Hz). The drive line PLAYS "
+                f"xy.RF_frequency (QUAM's intermediate_frequency = RF - LO feeds every "
+                f"probe's update_frequency) while scqo's drive_freq_hz READS f_01, so "
+                f"the knob would show a number the hardware never emits. Edit "
+                f"state.json so both hold the intended value (the audit cannot know "
+                f"which one is right).")
+    return problems
+
+
+def _octave_channels(machine: Any):
+    """``(label, channel)`` for every drive/readout channel on an Octave chain.
+
+    Labels are state.json paths, because every problem below ends in a hand edit
+    of that file and a message naming a Python attribute would leave the operator
+    to translate.
+    """
+    for name, qubit in getattr(machine, "qubits", {}).items():
+        for line in ("xy", "resonator"):
+            channel = getattr(qubit, line, None)
+            if channel is not None and rf_chain(channel) == RF_OCTAVE:
+                yield f"qubits.{name}.{line}", channel
+
+
+def octave_frequency_problems(machine: Any) -> list[str]:
+    """Every Octave channel whose frequencies the hardware cannot actually produce.
+
+    **Nothing in the vendor stack checks any of this.** There is no LO-grid check
+    and no IF-window check anywhere in ``qm``, ``quam`` or ``quam_builder``; the
+    only guards that ever existed are two ``assert`` lines in
+    ``quam_config/populate_quam_opxp_octave.py``, which run when a tree is first
+    seeded and never again. An MW-FEM tree needs none of this -- its LO is a port
+    field inside a declared band, and the instrument rejects a band that does not
+    cover it -- so this audit has no MW counterpart and did not exist before.
+
+    Four rules, in the order they bite:
+
+    1. the up-converter must HAVE an LO;
+    2. that LO must be on the 250 MHz grid inside [2, 18] GHz;
+    3. ``IF = RF - LO`` must stay inside +/-400 MHz -- on an Octave the IF is a
+       real analog baseband signal, not a digital offset inside a band;
+    4. the down-converter LO must equal the up-converter's. UNSET is the
+       dangerous case and it is SILENT: quam's ``apply_to_config`` omits the whole
+       ``RF_inputs`` entry when it is not a number, so the generated config simply
+       has no receive path and reports no error.
+
+    Plus the constraint with no MW-FEM analogue at all: two RF outputs sharing a
+    SYNTHESIZER are forced to the same LO, so a tree asking for two is asking for
+    something the Octave cannot do -- and the MW-FEM habit of thinking in
+    independently tunable per-port LOs is exactly what makes it surprising.
+
+    Pure (no I/O, no QUA); the caller decides how loudly to fail. Skips what it
+    cannot judge -- an unset RF, a converter with no id -- because an audit that
+    guesses is worse than one that stays quiet. Empty list = compliant.
+    """
+    problems: list[str] = []
+    by_synth: dict[tuple[Any, Any], list[tuple[str, float]]] = {}
+
+    for label, channel in _octave_channels(machine):
+        up = getattr(channel, "frequency_converter_up", None)
+        lo = _finite_hz(getattr(up, "LO_frequency", None))
+        if lo is None:
+            problems.append(
+                f"{label}: its Octave up-converter has no LO frequency, so the "
+                f"tone has nothing to mix up to. Set "
+                f"octaves.<name>.RF_outputs.<n>.LO_frequency in state.json")
+            continue
+
+        reason = lo_grid_problem(lo)
+        if reason is not None:
+            problems.append(
+                f"{label}: {reason}. The synthesizer cannot produce it; pick the "
+                f"nearest grid point and re-check IF = RF - LO")
+
+        rf = _finite_hz(getattr(channel, "RF_frequency", None))
+        if rf is not None:
+            reason = if_window_problem(rf, lo)
+            if reason is not None:
+                problems.append(
+                    f"{label}: {reason}. Move the LO (it is shared by everything "
+                    f"on that RF output, and by the other output on its "
+                    f"synthesizer) rather than the RF, which is the physics")
+
+        rf_output = getattr(up, "id", None)
+        if rf_output is not None:
+            octave = getattr(getattr(up, "octave", None), "name", None)
+            by_synth.setdefault(
+                (octave, synth_of_rf_output(rf_output)), []).append((label, lo))
+
+        down = getattr(channel, "frequency_converter_down", None)
+        if down is None:
+            continue
+        down_lo = _finite_hz(getattr(down, "LO_frequency", None))
+        if down_lo is None:
+            problems.append(
+                f"{label}: its Octave DOWN-converter has no LO frequency. quam "
+                f"then omits the whole RF_inputs entry from the generated config, "
+                f"so the run has no receive path at all and nothing says so - it "
+                f"is the quietest failure on this chain. Point "
+                f"octaves.<name>.RF_inputs.<n>.LO_frequency at the up-converter's "
+                f"LO (normally a QUAM reference, which is what keeps the two from "
+                f"drifting apart)")
+        elif abs(down_lo - lo) > LO_TOLERANCE_HZ:
+            problems.append(
+                f"{label}: the Octave down-converter LO is {down_lo / 1e9:g} GHz "
+                f"but the up-converter runs at {lo / 1e9:g} GHz. Demodulation is "
+                f"referenced to the down-converter, so every phase and both "
+                f"quadratures are wrong by the difference. They must be equal - "
+                f"prefer repairing the QUAM reference over writing a second "
+                f"literal")
+
+    for (octave, synth), members in sorted(
+            by_synth.items(), key=lambda kv: str(kv[0])):
+        if synth is None or len(members) < 2:
+            continue
+        distinct = {round(lo, 3) for _, lo in members}
+        if len(distinct) > 1:
+            where = ", ".join(f"{label} at {lo / 1e9:g} GHz" for label, lo in members)
+            problems.append(
+                f"octave {octave!r} synth{synth} drives RF outputs "
+                f"{SYNTH_OUTPUTS[synth]} from ONE synthesizer, but this tree asks "
+                f"it for {len(distinct)} different LOs ({where}). Unlike an "
+                f"MW-FEM, whose ports pair only for their band and each keep "
+                f"their own upconverter_frequency, these outputs cannot be tuned "
+                f"apart. Re-wire onto outputs on different synthesizers "
+                f"(synth1: RF1, synth2: RF2+RF3, synth3: RF4+RF5), or give both "
+                f"lines the same LO and split them in the IF")
+
+    return problems
+
+
+def octave_calibration_warnings(machine: Any) -> list[str]:
+    """Advisories about where each Octave's mixer calibration will be looked for.
+
+    Advisory rather than fatal, and deliberately: an unset
+    ``calibration_db_path`` still WORKS as long as every process starts in the
+    same directory, so refusing would block a setup that measures fine today. It
+    is fragile rather than broken -- which is precisely the case a warning is
+    for, and precisely the case nothing said anything about before.
+    """
+    out: list[str] = []
+    for name, octave in (getattr(machine, "octaves", {}) or {}).items():
+        if getattr(octave, "calibration_db_path", None):
+            continue
+        out.append(
+            f"octave {name!r} has no calibration_db_path, so quam falls back to "
+            f"the process working directory: its mixer calibration follows "
+            f"wherever scqo was launched from, and a run started elsewhere "
+            f"silently finds none and plays uncalibrated. Set "
+            f"octaves.{name}.calibration_db_path in state.json to the setup's "
+            f"own backend_config/ folder")
+    return out
+
+
+def octave_output_problems(machine: Any) -> list[str]:
+    """Every ACTIVE Octave channel whose RF switch is off.
+
+    ``OctaveUpConverter.output_mode`` defaults to ``always_off``, so a tree
+    assembled without setting it emits nothing at all -- no error at build, none
+    at run, and a measurement that returns a clean flat line. Restricted to
+    ``active_qubits`` on purpose: parking a line by switching its output off is
+    legitimate, and refusing it everywhere would block a config someone chose.
+
+    ``triggered`` / ``triggered_reversed`` are not flagged; they are a real mode
+    driven by digital markers, which QUAM wires up.
+    """
+    problems: list[str] = []
+    try:
+        active = {q.name for q in getattr(machine, "active_qubits", [])}
+    except Exception:
+        active = set()
+    for label, channel in _octave_channels(machine):
+        if label.split(".")[1] not in active:
+            continue
+        up = getattr(channel, "frequency_converter_up", None)
+        if getattr(up, "output_mode", None) != "always_off":
+            continue
+        problems.append(
+            f"{label}: its Octave RF switch is 'always_off', so that line emits "
+            f"nothing - the run would complete and return a flat line with no "
+            f"error anywhere. Set octaves.<name>.RF_outputs.<n>.output_mode to "
+            f"'always_on' in state.json (this is QUAM's DEFAULT value, so a "
+            f"hand-assembled tree that never set it lands here)")
+    return problems
+
+
+def rf_frequency_reference_problems(machine: Any) -> list[str]:
+    """Every drive/readout channel whose ``RF_frequency`` is STORED as a reference.
+
+    The quietest failure in the frequency mapping, and the one
+    :func:`drive_frequency_problems` structurally cannot see. ``IQChannel`` and
+    ``MWChannel`` both DEFAULT ``RF_frequency`` to ``"#./inferred_RF_frequency"``
+    (LO + IF). A tree that kept the default READS perfectly — QUAM resolves the
+    reference and hands back a number, so every audit, every snapshot and every
+    ``scqo state`` agrees the frequency is fine. The first WRITE is where it dies:
+    QUAM refuses a literal over a reference outright, so ``set_drive_freq`` /
+    ``set_readout_freq`` raise ``ValueError`` mid-run, at writeback, after the
+    instrument time is already spent.
+
+    ``quam_builder``'s own transmon builders avoid this by constructing with
+    ``RF_frequency=None`` and referencing the IF instead, which is why every tree
+    built by ``build_quam`` is already compliant and the live states are too. A
+    hand-written tree, or one assembled some other way, is the way in — and an
+    Octave tree is the likeliest to be hand-assembled, which is why this became
+    worth auditing.
+
+    Pure (no I/O, no QUA); the caller decides how loudly to fail. Empty list =
+    compliant.
+    """
+    problems: list[str] = []
+    for name, qubit in getattr(machine, "qubits", {}).items():
+        for line in ("xy", "resonator"):
+            channel = getattr(qubit, line, None)
+            if channel is None:
+                continue
+            if not _field_is_reference(channel, "RF_frequency"):
+                continue
+            problems.append(
+                f"qubits.{name}.{line}.RF_frequency is stored as a QUAM reference, "
+                f"not a number. It READS fine (QUAM resolves it to LO + IF), so "
+                f"nothing else notices - but QUAM refuses to overwrite a reference "
+                f"with a literal, so the first writeback would raise mid-run after "
+                f"the instrument time is spent. Store the resolved value as a "
+                f"literal and reference the IF instead (the shape build_quam "
+                f"produces, and what every live state already carries): "
+                f"python quam_config/convert_state_rf_literal.py <backend_config dir>")
+    return problems
+
+
 #: Every named standing-bias attribute a flux channel can carry — the qubit
 #: FluxLine vocabulary plus the TunableCoupler one. Audited together because the
 #: DAC does not care which name a bias arrived under.
@@ -534,7 +805,8 @@ def get_flux_delay(flux_channel: Any) -> float:
     ``flux_channel`` is the FLUX-carrying QUAM channel the scqo flux view wraps —
     a qubit's ``z`` FluxLine or a ``TunableCoupler`` (both SingleChannels with an
     ``opx_output`` port). The delay is a PORT-level ``int`` ns field
-    (``LFFEMAnalogOutputPort.delay``, 0 by default), shared by everything on that
+    (``LFAnalogOutputPort.delay``, 0 by default -- the shared base, so it is on
+    an OPX+ analog output exactly as on an LF-FEM), shared by everything on that
     physical DAC output; on a per-qubit z wire that is per-qubit in practice.
     """
     return float(flux_channel.opx_output.delay) / 1e9

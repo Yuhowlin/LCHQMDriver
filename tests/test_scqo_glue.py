@@ -121,6 +121,30 @@ def test_field_catalog_matches_implementation():
         assert v.kind in VENDOR_ONLY_KINDS, name
         if v.kind == "unique":
             assert "no qblox counterpart" in v.doc.lower(), name
+        # the operational half. `coupled` is checked the way binding.coupled is:
+        # a typo or a half-deleted pairing must not survive as a dangling name.
+        assert set(v.coupled) <= (set(fieldmap.VENDOR_ONLY) | ALL_STATIC_FIELDS) - {name}, name
+        # a tuple typo here would render as a Python repr on a lab console
+        assert isinstance(v.edit, str) and isinstance(v.counterpart, str), name
+        assert all(s.isascii() for s in (v.doc, v.edit, v.counterpart)), name
+    # DELIBERATELY NOT asserted, and it must stay that way:
+    #   "every non-unique entry declares a counterpart" - several entries have no
+    #     counterpart prose to extract and inventing one would be a new claim;
+    #   "every realizer declares an edit" - coupler_interaction_offset and
+    #     coupler_arbitrary_offset realize idle_flux only while flux_point is
+    #     'on'/'arbitrary', which the factory PINS off, so no governed write is
+    #     reachable and a filled-in `edit` would be a false runbook.
+
+    # `band` is a live, mutated MW-FEM port field (broadband_qubit_spectroscopy
+    # writes and restores it) - it must stay declared, next to the LO it covers.
+    for band, lo in (("readout_band", "readout_upconverter_frequency"),
+                     ("drive_band", "drive_upconverter_frequency"),
+                     ("downconverter_band", "downconverter_frequency")):
+        entry = fieldmap.VENDOR_ONLY[band]
+        # not "unique": broadband_qubit_spectroscopy, the experiment that writes
+        # band, is registered on Qblox too - a lock-in claim would be false
+        assert entry.kind == "vendor", band
+        assert lo in entry.coupled, band
 
     tree = ast.parse(Path(fieldmap.__file__).read_text(encoding="utf-8"))
     imported = {
@@ -139,7 +163,48 @@ def test_field_catalog_matches_implementation():
     assert QMBackend.field_bindings(None) == fieldmap.FIELD_BINDINGS
     assert QMBackend.unrealized(None) == fieldmap.UNREALIZED
     assert QMBackend.vendor_only(None) == fieldmap.VENDOR_ONLY
+    assert QMBackend.operator_commands(None) == fieldmap.OPERATOR_COMMANDS
     assert set(_CHANNEL_VIEWS) == SERVED_KINDS
+
+
+def test_operator_command_inventory():
+    """The vendor CLIs this driver ships. They are not scqo subcommands, so
+    `scqo -h` cannot show them and this inventory (rendered by
+    `scqo state --fields`) is where an operator finds them instead of
+    memorizing them."""
+    import importlib.util
+
+    from scqo_qm.backend import fieldmap
+
+    commands = fieldmap.OPERATOR_COMMANDS
+    assert commands, "the driver ships operator CLIs; declaring none hides them"
+    names = [c.name for c in commands]
+    assert len(set(names)) == len(names), names
+    for c in commands:
+        assert c.name and c.command and c.doc, c.name
+        assert all(s.isascii() for s in (c.name, c.command, c.doc, c.options,
+                                         c.caution)), c.name
+        # anti-rot: a renamed or moved operator module fails HERE, in CI, and
+        # not six weeks later in the lab with a command that no longer exists
+        for word in c.command.split():
+            if word.startswith("scqo_qm."):
+                assert importlib.util.find_spec(word), f"{c.name}: {word}"
+
+
+def test_distortion_hint_and_inventory_agree():
+    """The cryoscope writeback hint builds a RESOLVED command (this target, this
+    run) while the inventory carries a <placeholder> template, so they are two
+    artifacts on purpose - but they must name the same module. Deriving one from
+    the other would buy a placeholder-substitution contract nothing else needs;
+    this assert buys the anti-drift property instead."""
+    from scqo_qm.backend import fieldmap
+    from scqo_qm.backend.qm_backend import QMBackend
+
+    entry = next(c for c in fieldmap.OPERATOR_COMMANDS
+                 if c.name == "apply_distortion")
+    prefix = entry.command.split(" --")[0]
+    # distortion_apply_command uses no self, so the unbound call needs no hardware
+    assert QMBackend.distortion_apply_command(None, "q1").startswith(prefix)
 
 
 def test_composite_knob_catalog_covers_every_op_knob():
@@ -196,6 +261,39 @@ def test_backend_entry_point_resolves_and_guards_fire(tmp_path, roster):
         factory(pull_cfg, {"backend": "qblox"}, roster)  # wrong family refused
 
 
+def test_factory_runs_the_whole_tree_audits_on_the_loaded_state(tmp_path, roster, monkeypatch):
+    """The audits fire from build_backend (the only place they run) and REFUSE
+    with SystemExit naming the file. QMBackend.load is stubbed to hand back the
+    fixture tree, so no QUAM state is needed -- only the two canonical files the
+    factory checks for before loading."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from scqo.labconfig import LabConfig
+
+    from conftest import make_stub_machine
+    from scqo_qm import scqo_backend
+    from scqo_qm.backend import qm_backend
+
+    folder = tmp_path / "backend_config"
+    folder.mkdir()
+    for name in ("state.json", "wiring.json"):
+        (folder / name).write_text("{}", encoding="utf-8")
+    setup = {"backend": "qm", "instrument_config": str(folder)}
+    cfg = LabConfig(state_sync="pull")
+
+    machine = make_stub_machine()
+    monkeypatch.setattr(qm_backend.QMBackend, "load",
+                        lambda **kw: SimpleNamespace(machine=machine))
+    assert scqo_backend.build_backend(cfg, setup, roster).machine is machine  # compliant
+
+    machine.qubits["q1"].xy.RF_frequency = 4.9e9  # f_01 stays 4.8e9
+    with pytest.raises(SystemExit, match="drive frequencies") as exc:
+        scqo_backend.build_backend(cfg, setup, roster)
+    assert "qubits.q1.f_01" in str(exc.value) and "state.json" in str(exc.value)
+
+
 def test_components_inventory_is_a_truthful_witness(backend, roster):
     """``components()`` is the doctor's WITNESS: exactly the entities this backend
     serves a view for, each reported with the ROSTER's kind (a kind disagreement
@@ -214,7 +312,9 @@ def test_components_inventory_is_a_truthful_witness(backend, roster):
     assert inventory["q1_ro"].operations == ("readout",)
     assert inventory["q1_xy"].operations == ("rx",)
     assert inventory["q1_q2_c_z"].operations == ("flux_bias",)
-    assert inventory["q1_q2"].operations == ("cz",)
+    # two DECLARED operations on the pair, deliberately of different macro
+    # shapes: the vendor CZGate and the lab's ISwapImplementation (conftest)
+    assert inventory["q1_q2"].operations == ("cz", "iswap")
     assert inventory["q1_q2"].members["coupler"] == ("q1_q2_c",)
 
     checks = vendor_checks(roster, inventory)
