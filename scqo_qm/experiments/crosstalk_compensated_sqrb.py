@@ -7,6 +7,7 @@ Compares isolated SQRB, simultaneous SQRB, and active crosstalk-compensated simu
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import xarray as xr
@@ -79,6 +80,12 @@ CLIFFORD_3SUBSLOTS = [
 ]
 
 
+# Every op a compensation track can play in benchmark mode (mirrored from the aggressor)
+CANCEL_MIRROR_OPS: tuple[str, ...] = tuple(
+    sorted({slot[0] for subslots in CLIFFORD_3SUBSLOTS for slot in subslots if slot is not None})
+)
+
+
 def play_fixed_clifford(gate_idx, qubit, pulse_cycles: int):
     """Play single Clifford gate decomposed into 3 fixed-duration subslots."""
     with switch_(gate_idx, unsafe=True):
@@ -137,6 +144,50 @@ def play_fixed_compensation_clifford(
                                 frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
 
 
+def _play_cancel_subslot(
+    slot_idx: int,
+    subslots_src,
+    cancel_elem_name: str,
+    amp_val: float,
+    sub_phase_rate_turns: float,
+    pulse_cycles: int,
+):
+    """Play one subslot of a compensation track mirroring the aggressor's gate.
+
+    Idle subslots advance the frame before the wait, pulsed subslots after the play. For
+    3-pulse gates the frame advances by 2*sub_p after pulse 2 and pulse 3 is rotated back by
+    sub_p through the amp matrix, keeping subslot 3 free of frame rotations.
+    """
+    slots_src = [s for s in subslots_src if s is not None]
+    a = float(amp_val)
+    if len(slots_src) == 3 and slot_idx == 1:
+        play(slots_src[1][0] * amp(a), cancel_elem_name)
+        if sub_phase_rate_turns != 0.0:
+            frame_rotation_2pi(2.0 * sub_phase_rate_turns, cancel_elem_name)
+        return
+    if len(slots_src) == 3 and slot_idx == 2:
+        if sub_phase_rate_turns != 0.0:
+            theta = -2.0 * np.pi * float(sub_phase_rate_turns)
+            v00 = float(a * np.cos(theta))
+            v01 = float(-a * np.sin(theta))
+            v10 = float(a * np.sin(theta))
+            v11 = float(a * np.cos(theta))
+            play(slots_src[2][0] * amp(v00, v01, v10, v11), cancel_elem_name)
+        else:
+            play(slots_src[2][0] * amp(a), cancel_elem_name)
+        return
+
+    slot = subslots_src[slot_idx]
+    if slot is None:
+        if sub_phase_rate_turns != 0.0:
+            frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
+        wait(pulse_cycles, cancel_elem_name)
+    else:
+        play(slot[0] * amp(a), cancel_elem_name)
+        if sub_phase_rate_turns != 0.0:
+            frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
+
+
 def play_simultaneous_clifford_subslots(
     gate_p: int,
     gate_d: int,
@@ -148,100 +199,52 @@ def play_simultaneous_clifford_subslots(
     amp_val: float,
     sub_phase_rate_turns: float,
     pulse_cycles: int,
+    reverse_cancel_elem_name: str | None = None,
+    reverse_amp_val: float = 0.0,
+    reverse_sub_phase_rate_turns: float = 0.0,
 ):
     """Play single Clifford gate decomposed into 3 fixed-duration subslots synchronously across channels.
 
-    Subslots are played simultaneously for probe_qubit, drive_qubit, and cancel_elem
+    Subslots are played simultaneously for probe_qubit, drive_qubit and the cancel element(s)
     to ensure perfect pulse alignment and zero inter-gate timing gaps under strict_timing_().
+
+    cond: 'isolated' (probe only), 'isolated_drive' (drive only, bidirectional isolated pass),
+    'simultaneous' (both) or 'compensated' (both + cancellation). Under 'compensated',
+    cancel_elem_name mirrors the drive gate (drive -> probe crosstalk) and, when given,
+    reverse_cancel_elem_name mirrors the probe gate (probe -> drive crosstalk).
     """
     subslots_p = CLIFFORD_3SUBSLOTS[gate_p]
     subslots_d = CLIFFORD_3SUBSLOTS[gate_d]
+    play_probe = cond != "isolated_drive"
+    play_drive = cond in ("simultaneous", "compensated", "isolated_drive")
+    compensate = cond == "compensated"
 
-    theta = -2.0 * np.pi * float(sub_phase_rate_turns)
-    a = float(amp_val)
-    v00 = float(a * np.cos(theta))
-    v01 = float(-a * np.sin(theta))
-    v10 = float(a * np.sin(theta))
-    v11 = float(a * np.cos(theta))
-
-    # Subslot 0
-    if subslots_p[0] is None:
-        probe_qubit.xy.wait(pulse_cycles)
-    else:
-        probe_qubit.xy.play(subslots_p[0][0])
-
-    if cond in ("simultaneous", "compensated"):
-        if subslots_d[0] is None:
-            drive_qubit.xy.wait(pulse_cycles)
-        else:
-            drive_qubit.xy.play(subslots_d[0][0])
-
-    if cond == "compensated":
-        if subslots_d[0] is None:
-            if sub_phase_rate_turns != 0.0:
-                frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
-            wait(pulse_cycles, cancel_elem_name)
-        else:
-            play(subslots_d[0][0] * amp(a), cancel_elem_name)
-            if sub_phase_rate_turns != 0.0:
-                frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
-
-    # Subslot 1
-    if subslots_p[1] is None:
-        probe_qubit.xy.wait(pulse_cycles)
-    else:
-        probe_qubit.xy.play(subslots_p[1][0])
-
-    if cond in ("simultaneous", "compensated"):
-        if subslots_d[1] is None:
-            drive_qubit.xy.wait(pulse_cycles)
-        else:
-            drive_qubit.xy.play(subslots_d[1][0])
-
-    if cond == "compensated":
-        slots_d = [s for s in subslots_d if s is not None]
-        if len(slots_d) == 3:
-            play(slots_d[1][0] * amp(a), cancel_elem_name)
-            if sub_phase_rate_turns != 0.0:
-                frame_rotation_2pi(2.0 * sub_phase_rate_turns, cancel_elem_name)
-        else:
-            if subslots_d[1] is None:
-                if sub_phase_rate_turns != 0.0:
-                    frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
-                wait(pulse_cycles, cancel_elem_name)
+    for slot_idx in range(3):
+        if play_probe:
+            if subslots_p[slot_idx] is None:
+                probe_qubit.xy.wait(pulse_cycles)
             else:
-                play(subslots_d[1][0] * amp(a), cancel_elem_name)
-                if sub_phase_rate_turns != 0.0:
-                    frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
+                probe_qubit.xy.play(subslots_p[slot_idx][0])
 
-    # Subslot 2
-    if subslots_p[2] is None:
-        probe_qubit.xy.wait(pulse_cycles)
-    else:
-        probe_qubit.xy.play(subslots_p[2][0])
-
-    if cond in ("simultaneous", "compensated"):
-        if subslots_d[2] is None:
-            drive_qubit.xy.wait(pulse_cycles)
-        else:
-            drive_qubit.xy.play(subslots_d[2][0])
-
-    if cond == "compensated":
-        slots_d = [s for s in subslots_d if s is not None]
-        if len(slots_d) == 3:
-            if sub_phase_rate_turns != 0.0:
-                play(slots_d[2][0] * amp(v00, v01, v10, v11), cancel_elem_name)
+        if play_drive:
+            if subslots_d[slot_idx] is None:
+                drive_qubit.xy.wait(pulse_cycles)
             else:
-                play(slots_d[2][0] * amp(a), cancel_elem_name)
-        else:
-            if subslots_d[2] is None:
-                if sub_phase_rate_turns != 0.0:
-                    frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
-                wait(pulse_cycles, cancel_elem_name)
-            else:
-                play(subslots_d[2][0] * amp(a), cancel_elem_name)
-                if sub_phase_rate_turns != 0.0:
-                    frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
+                drive_qubit.xy.play(subslots_d[slot_idx][0])
+
+        if compensate:
+            _play_cancel_subslot(
+                slot_idx, subslots_d, cancel_elem_name, amp_val, sub_phase_rate_turns, pulse_cycles
+            )
+            if reverse_cancel_elem_name is not None:
+                _play_cancel_subslot(
+                    slot_idx,
+                    subslots_p,
+                    reverse_cancel_elem_name,
+                    reverse_amp_val,
+                    reverse_sub_phase_rate_turns,
+                    pulse_cycles,
+                )
 
 
 CLIFFORD_PULSES: list[list[str]] = [
@@ -350,14 +353,26 @@ def build_program(
     simulate: bool = False,
     conditions: list[str] | None = None,
     strict_timing: bool = True,
+    bidirectional: bool = False,
+    drive_cancel_amp: float = 0.0,
+    drive_init_phase: float = 0.0,
+    reverse_sub_phase_rate_turns: float | None = None,
 ):
-    """Build the QUA program for Crosstalk Compensated Simultaneous SQRB."""
+    """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
+
+    bidirectional (benchmark only): a second cancel element on the drive qubit's line mirrors
+    the probe's gates, both qubits are read out (streams I1/I2), and the isolated condition
+    runs probe-alone then drive-alone within each shot so every qubit has its own isolated RB.
+    """
     depth_arr = np.asarray(depths, dtype=int) if depths is not None else np.array([4])
     if sequence_indices is not None:
         seq_arr = np.asarray(sequence_indices, dtype=int)
     else:
         seq_arr = np.arange(num_sequences, dtype=int)
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
+    bidirectional = bool(bidirectional) and mode == "benchmark"
+    reverse_cancel_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
+    read_qubits = [probe_qubit, drive_qubit] if bidirectional else [probe_qubit]
 
     if cal_stage_repetitions is not None:
         cal_reps = [int(cal_stage_repetitions)] if isinstance(cal_stage_repetitions, (int, np.integer)) else [int(r) for r in cal_stage_repetitions]
@@ -380,6 +395,8 @@ def build_program(
         sub_p = float(phase_rate_turns)
     else:
         sub_p = 0.0
+    # Reverse direction sees the opposite detuning (f_p - f_d)
+    rev_sub_p = float(reverse_sub_phase_rate_turns) if reverse_sub_phase_rate_turns is not None else -sub_p
 
     cond_name_map = {"isolated": 0, "simultaneous": 1, "compensated": 2}
     if conditions is not None:
@@ -396,17 +413,20 @@ def build_program(
         }
     else:
         sweep_axes = {
-            "qubit": xr.DataArray([probe_qubit.name]),
+            "qubit": xr.DataArray([q.name for q in read_qubits]),
             "condition": xr.DataArray(np.asarray(benchmark_conditions, dtype=str)),
             "sequence_idx": xr.DataArray(seq_arr),
             "depth": xr.DataArray(depth_arr),
         }
 
     with program() as prog:
-        I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
+        if bidirectional:
+            I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables(num_IQ_pairs=len(read_qubits))
+        else:
+            I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
         if use_state_discrimination:
-            state = [declare(int)]
-            state_st = [declare_stream()]
+            state = [declare(int) for _ in read_qubits]
+            state_st = [declare_stream() for _ in read_qubits]
 
         m = declare(int)
         m_st = declare_stream()
@@ -487,8 +507,19 @@ def build_program(
         else:
             # Benchmark mode: sweep depths across selected conditions with precomputed sequences
             assign(init_phase_fixed, float(init_phase / (2 * np.pi)))
+            xy_elems = [probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem]
+            if reverse_cancel_elem is not None:
+                xy_elems.append(reverse_cancel_elem)
+            timing_block = strict_timing_ if strict_timing else nullcontext
 
             for cond in benchmark_conditions:
+                # (played condition, indices into read_qubits measured after it). Bidirectional
+                # isolated runs probe-alone then drive-alone in the same shot, one qubit read each.
+                if bidirectional and cond == "isolated":
+                    passes = [("isolated", [0]), ("isolated_drive", [1])]
+                else:
+                    passes = [(cond, list(range(len(read_qubits))))]
+
                 for m_idx in seq_arr:
                     m_int = int(m_idx)
                     assign(m, m_int)
@@ -500,65 +531,49 @@ def build_program(
                         gate_list_d = seqs_d[d_int][m_int]
 
                         with for_(n, 0, n < num_shots, n + 1):
-                            probe_qubit.reset(reset_type, simulate)
-                            drive_qubit.reset(reset_type, simulate)
-                            if strict_timing:
-                                with strict_timing_():
-                                    align(probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem)
-                                    reset_frame(probe_qubit.xy.name)
-                                    reset_frame(drive_qubit.xy.name)
-                                    reset_frame(cancel_elem)
-                                    reset_if_phase(probe_qubit.xy.name)
-                                    reset_if_phase(drive_qubit.xy.name)
-                                    reset_if_phase(cancel_elem)
+                            for play_cond, read_idx in passes:
+                                probe_qubit.reset(reset_type, simulate)
+                                drive_qubit.reset(reset_type, simulate)
+                                with timing_block():
+                                    align(*xy_elems)
+                                    for el in xy_elems:
+                                        reset_frame(el)
+                                    for el in xy_elems:
+                                        reset_if_phase(el)
                                     reset_global_phase()
                                     frame_rotation_2pi(init_phase_fixed, cancel_elem)
+                                    if reverse_cancel_elem is not None:
+                                        frame_rotation_2pi(
+                                            float(drive_init_phase / (2 * np.pi)), reverse_cancel_elem
+                                        )
 
                                     for k in range(d_int + 1):
                                         play_simultaneous_clifford_subslots(
                                             gate_list_p[k],
                                             gate_list_d[k],
-                                            cond=cond,
+                                            cond=play_cond,
                                             probe_qubit=probe_qubit,
                                             drive_qubit=drive_qubit,
                                             cancel_elem_name=cancel_elem,
                                             amp_val=float(cancel_amp),
                                             sub_phase_rate_turns=sub_p,
                                             pulse_cycles=pulse_cycles,
+                                            reverse_cancel_elem_name=reverse_cancel_elem,
+                                            reverse_amp_val=float(drive_cancel_amp),
+                                            reverse_sub_phase_rate_turns=rev_sub_p,
                                         )
-                            else:
-                                align(probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem)
-                                reset_frame(probe_qubit.xy.name)
-                                reset_frame(drive_qubit.xy.name)
-                                reset_frame(cancel_elem)
-                                reset_if_phase(probe_qubit.xy.name)
-                                reset_if_phase(drive_qubit.xy.name)
-                                reset_if_phase(cancel_elem)
-                                reset_global_phase()
-                                frame_rotation_2pi(init_phase_fixed, cancel_elem)
 
-                                for k in range(d_int + 1):
-                                    play_simultaneous_clifford_subslots(
-                                        gate_list_p[k],
-                                        gate_list_d[k],
-                                        cond=cond,
-                                        probe_qubit=probe_qubit,
-                                        drive_qubit=drive_qubit,
-                                        cancel_elem_name=cancel_elem,
-                                        amp_val=float(cancel_amp),
-                                        sub_phase_rate_turns=sub_p,
-                                        pulse_cycles=pulse_cycles,
-                                    )
-
-                            align()
-                            if use_state_discrimination:
-                                probe_qubit.readout_state(state[0])
-                                save(state[0], state_st[0])
-                            else:
-                                probe_qubit.resonator.measure("readout", qua_vars=(I[0], Q[0]))
-                                save(I[0], I_st[0])
-                                save(Q[0], Q_st[0])
-                            align()
+                                align()
+                                # Multiplexed readout: no align between the measured qubits
+                                for i in read_idx:
+                                    if use_state_discrimination:
+                                        read_qubits[i].readout_state(state[i])
+                                        save(state[i], state_st[i])
+                                    else:
+                                        read_qubits[i].resonator.measure("readout", qua_vars=(I[i], Q[i]))
+                                        save(I[i], I_st[i])
+                                        save(Q[i], Q_st[i])
+                                align()
 
         with stream_processing():
             if mode == "calibrate":
@@ -572,11 +587,12 @@ def build_program(
                 num_conds = len(cond_indices)
                 num_seqs = len(seq_arr)
                 num_depths = len(depth_arr)
-                if use_state_discrimination:
-                    state_st[0].buffer(num_shots).map(FUNCTIONS.average()).buffer(num_depths).buffer(num_seqs).buffer(num_conds).save("state1")
-                else:
-                    I_st[0].buffer(num_shots).map(FUNCTIONS.average()).buffer(num_depths).buffer(num_seqs).buffer(num_conds).save("I1")
-                    Q_st[0].buffer(num_shots).map(FUNCTIONS.average()).buffer(num_depths).buffer(num_seqs).buffer(num_conds).save("Q1")
+                for i in range(len(read_qubits)):
+                    if use_state_discrimination:
+                        state_st[i].buffer(num_shots).map(FUNCTIONS.average()).buffer(num_depths).buffer(num_seqs).buffer(num_conds).save(f"state{i + 1}")
+                    else:
+                        I_st[i].buffer(num_shots).map(FUNCTIONS.average()).buffer(num_depths).buffer(num_seqs).buffer(num_conds).save(f"I{i + 1}")
+                        Q_st[i].buffer(num_shots).map(FUNCTIONS.average()).buffer(num_depths).buffer(num_seqs).buffer(num_conds).save(f"Q{i + 1}")
 
     return prog, sweep_axes
 
@@ -603,34 +619,42 @@ def acquire(
     )
 
 
-def _patch_cancel_element(config: dict, probe_qubit: Any, drive_qubit: Any, target_gate: str = "x180") -> dict:
-    """Add twin cancellation element to config with an independent hardware core.
+def _patch_cancel_element(
+    config: dict, victim_qubit: Any, aggressor_qubit: Any, target_gate: str = "x180"
+) -> dict:
+    """Add a cancellation element on the victim's line with an independent hardware core.
+
+    The element is a copy of the victim's xy element (victim port, IF and frame) whose
+    Clifford operations all point at the AGGRESSOR's pulses, so the compensation mirrors the
+    crosstalk waveform itself: every gate the aggressor plays is cancelled with its own
+    shape and relative amplitude, and cancel_amp is one scale for all of them.
 
     On OPX1000 architectures, elements bound to the same core cannot execute pulses
     concurrently (they are serialized). Assigning cancel_elem an unused core on the
-    same FEM allows cancel_elem and probe_qubit.xy to output simultaneously.
+    same FEM allows cancel_elem and victim_qubit.xy to output simultaneously. Called once per
+    direction; a second call sees the first cancel element's core as used.
     """
-    cancel_elem_name = f"{probe_qubit.xy.name}_cancel"
+    cancel_elem_name = f"{victim_qubit.xy.name}_cancel"
     if cancel_elem_name in config.get("elements", {}):
         return config
 
-    base_elem = config["elements"].get(probe_qubit.xy.name)
+    base_elem = config["elements"].get(victim_qubit.xy.name)
     if base_elem is None:
-        alt = probe_qubit.xy.name.replace("_", ".") if "_" in probe_qubit.xy.name else probe_qubit.xy.name.replace(".", "_")
+        alt = victim_qubit.xy.name.replace("_", ".") if "_" in victim_qubit.xy.name else victim_qubit.xy.name.replace(".", "_")
         base_elem = config["elements"].get(alt, {})
     elem_dict = copy.deepcopy(base_elem)
 
-    # Enforce target_gate operation on cancel_elem inherits pulse definition from drive_qubit
-    drive_name = drive_qubit.name if hasattr(drive_qubit, "name") else str(drive_qubit)
-    drive_elem_name = drive_qubit.xy.name if hasattr(drive_qubit, "xy") else f"{drive_name}.xy"
-    drive_elem = config["elements"].get(drive_elem_name)
-    if drive_elem is None:
-        alt_drive = drive_elem_name.replace("_", ".") if "_" in drive_elem_name else drive_elem_name.replace(".", "_")
-        drive_elem = config["elements"].get(alt_drive, {})
-    if drive_elem and "operations" in drive_elem and target_gate in drive_elem["operations"]:
-        elem_dict.setdefault("operations", {})[target_gate] = copy.deepcopy(
-            drive_elem["operations"][target_gate]
-        )
+    # Every op the compensation can play inherits the aggressor's pulse definition
+    aggressor_name = aggressor_qubit.name if hasattr(aggressor_qubit, "name") else str(aggressor_qubit)
+    aggressor_elem_name = aggressor_qubit.xy.name if hasattr(aggressor_qubit, "xy") else f"{aggressor_name}.xy"
+    aggressor_elem = config["elements"].get(aggressor_elem_name)
+    if aggressor_elem is None:
+        alt_aggr = aggressor_elem_name.replace("_", ".") if "_" in aggressor_elem_name else aggressor_elem_name.replace(".", "_")
+        aggressor_elem = config["elements"].get(alt_aggr, {})
+    aggressor_ops = (aggressor_elem or {}).get("operations", {})
+    for op in (*CANCEL_MIRROR_OPS, target_gate):
+        if op in aggressor_ops:
+            elem_dict.setdefault("operations", {})[op] = copy.deepcopy(aggressor_ops[op])
 
     # Assign an independent hardware core on the same FEM
     fem_port = None
@@ -675,35 +699,18 @@ def _patch_cancel_element(config: dict, probe_qubit: Any, drive_qubit: Any, targ
 class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
     """Build Crosstalk Compensated SQRB QUA program on QM OPX."""
 
-    def patch_preview_config(self, config: dict) -> dict:
-        """Patch the twin cancellation element into the generated config for preview."""
-        config = copy.deepcopy(config)
-        machine = self.backend.machine
-        from scqo_qm.experiments._lib import select_qubits
-
-        probe_name = self.params.probe_qubit
-        drive_name = self.params.drive_qubit
-        qubits = select_qubits(machine, [probe_name, drive_name], multiplexed=True)
-        q_dict = {q.name: q for q in qubits}
-        probe_qubit = q_dict.get(probe_name, qubits[0])
-        drive_qubit = q_dict.get(drive_name, qubits[1])
-
-        target_gate = getattr(self.params, "target_gate", "x180")
-        return _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate)
-
-    def probe(self) -> Any:
-        from ._reset import check_reset_method
+    def _select_pair(self):
         from scqo_qm.experiments._lib import select_qubits
 
         machine = self.backend.machine
         probe_name = self.params.probe_qubit
         drive_name = self.params.drive_qubit
-
         qubits = select_qubits(machine, [probe_name, drive_name], multiplexed=True)
         q_dict = {q.name: q for q in qubits}
-        probe_qubit = q_dict.get(probe_name, qubits[0])
-        drive_qubit = q_dict.get(drive_name, qubits[1])
+        return q_dict.get(probe_name, qubits[0]), q_dict.get(drive_name, qubits[1])
 
+    def _phase_rates_turns(self, probe_qubit, drive_qubit) -> tuple[float, float]:
+        """Per-subslot phase rates in turns, wrapped to (-0.5, 0.5]: (drive->probe, probe->drive)."""
         # Detect atomic pulse duration from calibrated probe x180 length
         try:
             x180_op = probe_qubit.xy.operations["x180"]
@@ -721,13 +728,49 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         else:
             sub_phase_rate_rad = float(self.params.phase_rate)
 
-        sub_phase_rate_turns = float((sub_phase_rate_rad / (2 * np.pi)) % 1.0)
-        if sub_phase_rate_turns > 0.5:
-            sub_phase_rate_turns -= 1.0
+        # Reverse direction sees the opposite detuning (f_p - f_d)
+        if self.params.drive_phase_rate is None:
+            rev_phase_rate_rad = -sub_phase_rate_rad
+        else:
+            rev_phase_rate_rad = float(self.params.drive_phase_rate)
+
+        def _wrap(rad: float) -> float:
+            turns = float((rad / (2 * np.pi)) % 1.0)
+            return turns - 1.0 if turns > 0.5 else turns
+
+        return _wrap(sub_phase_rate_rad), _wrap(rev_phase_rate_rad)
+
+    def _bidirectional_kwargs(self, rev_sub_phase_rate_turns: float) -> dict[str, Any]:
+        return {
+            "bidirectional": bool(self.params.bidirectional),
+            "drive_cancel_amp": float(self.params.drive_cancel_amp),
+            "drive_init_phase": float(self.params.drive_init_phase),
+            "reverse_sub_phase_rate_turns": rev_sub_phase_rate_turns,
+        }
+
+    def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
+        target_gate = getattr(self.params, "target_gate", "x180")
+        config = _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate)
+        if self.params.bidirectional:
+            config = _patch_cancel_element(config, drive_qubit, probe_qubit, target_gate)
+        return config
+
+    def patch_preview_config(self, config: dict) -> dict:
+        """Patch the cancellation element(s) into the generated config for preview."""
+        config = copy.deepcopy(config)
+        probe_qubit, drive_qubit = self._select_pair()
+        return self._patch_config(config, probe_qubit, drive_qubit)
+
+    def probe(self) -> Any:
+        from ._reset import check_reset_method
+
+        machine = self.backend.machine
+        probe_qubit, drive_qubit = self._select_pair()
+        sub_phase_rate_turns, rev_sub_phase_rate_turns = self._phase_rates_turns(probe_qubit, drive_qubit)
 
         target_gate = getattr(self.params, "target_gate", "x180")
         config = machine.generate_config()
-        config = _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate)
+        config = self._patch_config(config, probe_qubit, drive_qubit)
 
         stage_reps = list(self.params.get_cal_stage_repetitions()) if self.params.mode == "calibrate" else [20]
         initial_cal_reps = [stage_reps[0]] if self.params.mode == "calibrate" else [int(getattr(self.params, "cal_depth", 20))]
@@ -757,6 +800,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             seed=self.params.seed,
             simulate=getattr(self.backend, "simulate", False),
             strict_timing=bool(getattr(self.params, "strict_timing", True)),
+            **self._bidirectional_kwargs(rev_sub_phase_rate_turns),
         )
 
         if self.params.mode == "calibrate":
@@ -788,41 +832,18 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                 drive_qubit=drive_qubit,
                 reset_type=check_reset_method(self),
                 sub_phase_rate_turns=sub_phase_rate_turns,
+                rev_sub_phase_rate_turns=rev_sub_phase_rate_turns,
                 **kw,
             ),
         )
 
     def preview_program(self):
         """Render a single representative program for preview without memory bloat."""
-        from scqo_qm.experiments._lib import select_qubits
         from ._reset import check_reset_method
 
         machine = self.backend.machine
-        probe_name = self.params.probe_qubit
-        drive_name = self.params.drive_qubit
-        qubits = select_qubits(machine, [probe_name, drive_name], multiplexed=True)
-        q_dict = {q.name: q for q in qubits}
-        probe_qubit = q_dict.get(probe_name, qubits[0])
-        drive_qubit = q_dict.get(drive_name, qubits[1])
-
-        try:
-            x180_op = probe_qubit.xy.operations["x180"]
-            pulse_duration_ns = float(getattr(x180_op, "length", self.params.clifford_duration_ns))
-        except Exception:
-            pulse_duration_ns = float(self.params.clifford_duration_ns)
-
-        if self.params.phase_rate is None:
-            f_d = getattr(drive_qubit.xy, "RF_frequency", None) or getattr(drive_qubit, "f_01", None) or getattr(drive_qubit.xy, "intermediate_frequency", 50e6)
-            f_p = getattr(probe_qubit.xy, "RF_frequency", None) or getattr(probe_qubit, "f_01", None) or getattr(probe_qubit.xy, "intermediate_frequency", 50e6)
-            sub_phase_rate_rad = compute_theoretical_phase_rate(
-                float(f_d), float(f_p), pulse_duration_ns
-            )
-        else:
-            sub_phase_rate_rad = float(self.params.phase_rate)
-
-        sub_phase_rate_turns = float((sub_phase_rate_rad / (2 * np.pi)) % 1.0)
-        if sub_phase_rate_turns > 0.5:
-            sub_phase_rate_turns -= 1.0
+        probe_qubit, drive_qubit = self._select_pair()
+        sub_phase_rate_turns, rev_sub_phase_rate_turns = self._phase_rates_turns(probe_qubit, drive_qubit)
 
         target_gate = getattr(self.params, "target_gate", "x180")
         preview_conds = ["compensated"] if self.params.mode == "benchmark" else None
@@ -850,6 +871,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             use_state_discrimination=bool(self.params.use_state_discrimination),
             simulate=getattr(self.backend, "simulate", False),
             strict_timing=bool(getattr(self.params, "strict_timing", True)),
+            **self._bidirectional_kwargs(rev_sub_phase_rate_turns),
         )
         return prog
 
@@ -867,6 +889,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         drive_qubit=None,
         reset_type: str = "thermal",
         sub_phase_rate_turns: float = 0.0,
+        rev_sub_phase_rate_turns: float | None = None,
     ) -> xr.Dataset:
         """Execute fine-grained batched benchmark mode on Quantum Machine.
 
@@ -895,7 +918,9 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             for d_idx, d_batch in enumerate(depth_batches, 1):
                 current_step += 1
                 max_d = max(int(d) for d in d_batch)
-                gates_per_seq = max_d + 1
+                # Bidirectional doubles the program per sequence: the isolated condition runs
+                # two passes and compensated plays two cancel tracks.
+                gates_per_seq = (max_d + 1) * (2 if self.params.bidirectional else 1)
 
                 if fixed_seq_batch_size is not None and int(fixed_seq_batch_size) > 0:
                     seq_chunk_size = int(fixed_seq_batch_size)
@@ -929,6 +954,9 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                         seed=self.params.seed,
                         simulate=getattr(self.backend, "simulate", False),
                         strict_timing=bool(getattr(self.params, "strict_timing", True)),
+                        **self._bidirectional_kwargs(
+                            -sub_phase_rate_turns if rev_sub_phase_rate_turns is None else rev_sub_phase_rate_turns
+                        ),
                     )
 
                     ds_chunk = _acquire(
