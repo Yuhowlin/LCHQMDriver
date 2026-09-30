@@ -43,6 +43,7 @@ def build_program(
     simulate: bool = False,
     bidirectional: bool = False,
     drive_init_phase: float = 0.0,
+    drive_cancel_amp: float | None = None,
 ):
     """Build the QUA program for Crosstalk Cancellation Tomography.
 
@@ -127,9 +128,15 @@ def build_program(
                                         if sub_p != 0.0:
                                             frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
                                         if reverse_elem is not None:
-                                            if sub_p != 0.0:
-                                                frame_rotation_2pi(-sub_p, reverse_elem)
-                                            wait(pulse_cycles, reverse_elem)
+                                            if drive_cancel_amp is None:
+                                                if sub_p != 0.0:
+                                                    frame_rotation_2pi(-sub_p, reverse_elem)
+                                                wait(pulse_cycles, reverse_elem)
+                                            else:
+                                                # diagnostic: a concurrent play on the drive-line element
+                                                play(target_gate * amp(float(drive_cancel_amp)), reverse_elem)
+                                                if sub_p != 0.0:
+                                                    frame_rotation_2pi(-sub_p, reverse_elem)
                             else:
                                 wait(4, probe_qubit.xy.name)
 
@@ -245,6 +252,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
             simulate=getattr(self.backend, "simulate", False),
             bidirectional=bool(self.params.bidirectional),
             drive_init_phase=float(self.params.drive_init_phase),
+            drive_cancel_amp=self.params.drive_cancel_amp,
         )
         return prog
 
@@ -315,6 +323,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 simulate=getattr(self.backend, "simulate", False),
                 bidirectional=bool(self.params.bidirectional),
                 drive_init_phase=float(self.params.drive_init_phase),
+                drive_cancel_amp=self.params.drive_cancel_amp,
             )
 
             return _acquire(
@@ -354,6 +363,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 simulate=getattr(self.backend, "simulate", False),
                 bidirectional=bool(self.params.bidirectional),
                 drive_init_phase=float(self.params.drive_init_phase),
+                drive_cancel_amp=self.params.drive_cancel_amp,
             )
             ds_b = _acquire(
                 machine,

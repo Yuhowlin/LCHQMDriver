@@ -382,7 +382,7 @@ def test_bidirectional_simultaneous_reads_both_after_one_pass():
     mach, q1, q2, events = _recording_machine()
     build_program(
         mach, q1, q2, mode="benchmark", conditions=["simultaneous"], depths=[1], num_sequences=1,
-        num_shots=1, bidirectional=True, seed=3,
+        num_shots=1, bidirectional=True, seed=3, readout_scheme="simultaneous",
     )
     assert [e[1] for e in events if e[0] == "measure"] == ["q1", "q2"]
     assert [e[1] for e in events if e[0] == "reset"] == ["q1", "q2"]
@@ -487,3 +487,38 @@ def test_acquire_benchmark_bidirectional(monkeypatch):
     assert len(calls_bi) == 6
     assert list(res_bi.coords["qubit"].values) == ["q1", "q2"]
     assert list(res_bi.coords["sequence_idx"].values) == [0, 1]
+
+
+@pytest.mark.parametrize("scheme, passes, reads", [
+    ("separate_passes", 2, [["q1"], ["q2"]]),
+    ("sequential", 1, [["q1", "q2"]]),
+    ("simultaneous", 1, [["q1", "q2"]]),
+])
+def test_bidirectional_readout_scheme(scheme, passes, reads):
+    mach, q1, q2, events = _recording_machine()
+    build_program(
+        mach, q1, q2, mode="benchmark", conditions=["compensated"], depths=[1], num_sequences=1,
+        num_shots=1, bidirectional=True, seed=3, readout_scheme=scheme,
+    )
+    # a pass = reset of both qubits, gates, then its readouts
+    chunks, cur = [], []
+    for kind, who, _ in events:
+        if kind == "reset" and cur and cur[-1][0] == "measure":
+            chunks.append(cur)
+            cur = []
+        cur.append((kind, who))
+    chunks.append(cur)
+    assert len(chunks) == passes
+    assert [[w for k, w in c if k == "measure"] for c in chunks] == reads
+    # every pass plays both qubits' gates
+    for c in chunks:
+        assert {w for k, w in c if k == "play"} == {"q1.xy", "q2.xy"}
+
+
+def test_sequential_readout_aligns_between_measurements():
+    mach, q1, q2 = _mock_machine()
+    seq, _ = build_program(mach, q1, q2, mode="benchmark", conditions=["compensated"], depths=[1],
+                           num_sequences=1, num_shots=1, bidirectional=True, readout_scheme="sequential")
+    sim, _ = build_program(mach, q1, q2, mode="benchmark", conditions=["compensated"], depths=[1],
+                           num_sequences=1, num_shots=1, bidirectional=True, readout_scheme="simultaneous")
+    assert _script(seq).count("align()") == _script(sim).count("align()") + 1

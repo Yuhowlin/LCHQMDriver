@@ -357,6 +357,9 @@ def build_program(
     drive_cancel_amp: float = 0.0,
     drive_init_phase: float = 0.0,
     reverse_sub_phase_rate_turns: float | None = None,
+    reverse_track: bool | None = None,
+    read_both: bool | None = None,
+    readout_scheme: str = "separate_passes",
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -371,8 +374,11 @@ def build_program(
         seq_arr = np.arange(num_sequences, dtype=int)
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
     bidirectional = bool(bidirectional) and mode == "benchmark"
-    reverse_cancel_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
-    read_qubits = [probe_qubit, drive_qubit] if bidirectional else [probe_qubit]
+    # Diagnostics: each half of the bidirectional program can be switched off on its own
+    use_reverse = bidirectional and (reverse_track is None or bool(reverse_track))
+    read_drive = bidirectional and (read_both is None or bool(read_both))
+    reverse_cancel_elem = f"{drive_qubit.xy.name}_cancel" if use_reverse else None
+    read_qubits = [probe_qubit, drive_qubit] if read_drive else [probe_qubit]
 
     if cal_stage_repetitions is not None:
         cal_reps = [int(cal_stage_repetitions)] if isinstance(cal_stage_repetitions, (int, np.integer)) else [int(r) for r in cal_stage_repetitions]
@@ -420,7 +426,7 @@ def build_program(
         }
 
     with program() as prog:
-        if bidirectional:
+        if read_drive:
             I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables(num_IQ_pairs=len(read_qubits))
         else:
             I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
@@ -515,8 +521,11 @@ def build_program(
             for cond in benchmark_conditions:
                 # (played condition, indices into read_qubits measured after it). Bidirectional
                 # isolated runs probe-alone then drive-alone in the same shot, one qubit read each.
-                if bidirectional and cond == "isolated":
+                if read_drive and cond == "isolated":
                     passes = [("isolated", [0]), ("isolated_drive", [1])]
+                elif read_drive and readout_scheme == "separate_passes":
+                    # one qubit read per pass: the same sequence is played once per qubit
+                    passes = [(cond, [0]), (cond, [1])]
                 else:
                     passes = [(cond, list(range(len(read_qubits))))]
 
@@ -564,8 +573,10 @@ def build_program(
                                         )
 
                                 align()
-                                # Multiplexed readout: no align between the measured qubits
-                                for i in read_idx:
+                                # 'simultaneous': multiplexed; 'sequential': one after the other
+                                for j, i in enumerate(read_idx):
+                                    if j > 0 and readout_scheme == "sequential":
+                                        align()
                                     if use_state_discrimination:
                                         read_qubits[i].readout_state(state[i])
                                         save(state[i], state_st[i])
@@ -746,12 +757,15 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             "drive_cancel_amp": float(self.params.drive_cancel_amp),
             "drive_init_phase": float(self.params.drive_init_phase),
             "reverse_sub_phase_rate_turns": rev_sub_phase_rate_turns,
+            "reverse_track": self.params.reverse_track,
+            "read_both": self.params.read_both,
+            "readout_scheme": self.params.readout_scheme,
         }
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
         target_gate = getattr(self.params, "target_gate", "x180")
         config = _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate)
-        if self.params.bidirectional:
+        if self.params.uses_reverse_track():
             config = _patch_cancel_element(config, drive_qubit, probe_qubit, target_gate)
         return config
 
@@ -919,7 +933,8 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                 current_step += 1
                 max_d = max(int(d) for d in d_batch)
                 # Bidirectional doubles the program per sequence: the isolated condition runs
-                # two passes and compensated plays two cancel tracks.
+                # two passes, compensated plays two cancel tracks, and separate_passes readout
+                # plays every sequence once per qubit.
                 gates_per_seq = (max_d + 1) * (2 if self.params.bidirectional else 1)
 
                 if fixed_seq_batch_size is not None and int(fixed_seq_batch_size) > 0:
