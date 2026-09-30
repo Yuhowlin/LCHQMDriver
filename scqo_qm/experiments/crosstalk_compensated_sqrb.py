@@ -640,6 +640,27 @@ def acquire(
     )
 
 
+# Transient QOP failures seen on the lab cluster mid-run ("Internal error ... Compilation
+# failed", RPC/stream drops). A long benchmark is dozens of chunks; one of these must not
+# throw away every chunk already measured.
+_TRANSIENT_QOP_ERRORS = ("Internal error", "Compilation failed", "Unexpected error in RPC", "Connection lost")
+
+
+def _acquire_chunk_with_retry(machine, prog, sweep_axes, *, attempts: int = 3, pause_s: float = 30.0, **kw):
+    """_acquire one chunk, retrying the same program on a transient QOP error."""
+    import time
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return _acquire(machine, prog, sweep_axes, **kw)
+        except Exception as err:  # noqa: BLE001 - classified by message below
+            msg = f"{type(err).__name__}: {err}"
+            if attempt == attempts or not any(t in msg for t in _TRANSIENT_QOP_ERRORS):
+                raise
+            print(f"# [chunk retry {attempt}/{attempts - 1}] transient QOP error, retrying in {pause_s:.0f} s: {msg[:160]}")
+            time.sleep(pause_s)
+
+
 def _patch_cancel_element(
     config: dict, victim_qubit: Any, aggressor_qubit: Any, target_gate: str = "x180"
 ) -> dict:
@@ -991,7 +1012,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                             read_target=rt,
                         )
 
-                        ds_chunk = _acquire(
+                        ds_chunk = _acquire_chunk_with_retry(
                             machine,
                             cur_prog,
                             cur_axes,

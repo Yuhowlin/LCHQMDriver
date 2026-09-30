@@ -538,3 +538,26 @@ def test_read_target_builds_a_single_qubit_program():
     # the isolated pass for the drive target plays the drive qubit only
     first = events[: next(i for i, e in enumerate(events) if e[0] == "measure")]
     assert {e[1] for e in first if e[0] in ("play", "wait")} == {"q2.xy"}
+
+
+def test_chunk_retry_on_transient_qop_error(monkeypatch):
+    import scqo_qm.experiments.crosstalk_compensated_sqrb as mod
+
+    calls = []
+
+    def flaky(m, p, s, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("FailedToExecuteJobException: Internal error. Compilation failed.")
+        return "ok"
+
+    monkeypatch.setattr(mod, "_acquire", flaky)
+    assert mod._acquire_chunk_with_retry(None, None, None, pause_s=0) == "ok"
+    assert len(calls) == 2
+
+    def broken(m, p, s, **kw):
+        raise ValueError("a real bug")
+
+    monkeypatch.setattr(mod, "_acquire", broken)
+    with pytest.raises(ValueError):
+        mod._acquire_chunk_with_retry(None, None, None, pause_s=0)
