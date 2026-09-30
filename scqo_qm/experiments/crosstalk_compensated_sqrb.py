@@ -360,6 +360,7 @@ def build_program(
     reverse_track: bool | None = None,
     read_both: bool | None = None,
     readout_scheme: str = "separate_passes",
+    read_target: str | None = None,
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -379,6 +380,10 @@ def build_program(
     read_drive = bidirectional and (read_both is None or bool(read_both))
     reverse_cancel_elem = f"{drive_qubit.xy.name}_cancel" if use_reverse else None
     read_qubits = [probe_qubit, drive_qubit] if read_drive else [probe_qubit]
+    # read_target: this program reads ONE qubit ("probe" or "drive"); acquisition runs one
+    # program per qubit and merges them (separate_passes without doubling the program)
+    if read_drive and read_target in ("probe", "drive"):
+        read_qubits = [probe_qubit] if read_target == "probe" else [drive_qubit]
 
     if cal_stage_repetitions is not None:
         cal_reps = [int(cal_stage_repetitions)] if isinstance(cal_stage_repetitions, (int, np.integer)) else [int(r) for r in cal_stage_repetitions]
@@ -426,7 +431,7 @@ def build_program(
         }
 
     with program() as prog:
-        if read_drive:
+        if len(read_qubits) > 1:
             I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables(num_IQ_pairs=len(read_qubits))
         else:
             I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
@@ -521,7 +526,12 @@ def build_program(
             for cond in benchmark_conditions:
                 # (played condition, indices into read_qubits measured after it). Bidirectional
                 # isolated runs probe-alone then drive-alone in the same shot, one qubit read each.
-                if read_drive and cond == "isolated":
+                if read_drive and read_target in ("probe", "drive"):
+                    if cond == "isolated":
+                        passes = [("isolated" if read_target == "probe" else "isolated_drive", [0])]
+                    else:
+                        passes = [(cond, [0])]
+                elif read_drive and cond == "isolated":
                     passes = [("isolated", [0]), ("isolated_drive", [1])]
                 elif read_drive and readout_scheme == "separate_passes":
                     # one qubit read per pass: the same sequence is played once per qubit
@@ -948,44 +958,52 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                     for chunk in np.array_split(np.arange(total_sequences, dtype=int), num_chunks)
                 ]
 
-                seq_datasets: list[xr.Dataset] = []
+                read_targets = (
+                    ["probe", "drive"]
+                    if self.params.reads_both() and self.params.readout_scheme == "separate_passes"
+                    else [None]
+                )
+                seq_datasets: dict = {rt: [] for rt in read_targets}
                 for sc_idx, s_chunk in enumerate(seq_chunks, 1):
-                    cur_prog, cur_axes = build_program(
-                        machine,
-                        probe_qubit,
-                        drive_qubit,
-                        mode="benchmark",
-                        target_gate=target_gate,
-                        conditions=[cond],
-                        depths=d_batch,
-                        num_sequences=total_sequences,
-                        sequence_indices=s_chunk,
-                        num_shots=num_shots,
-                        cancel_amp=float(self.params.cancel_amp),
-                        init_phase=float(self.params.init_phase),
-                        sub_phase_rate_turns=sub_phase_rate_turns,
-                        reset_type=reset_type,
-                        use_state_discrimination=bool(self.params.use_state_discrimination),
-                        seed=self.params.seed,
-                        simulate=getattr(self.backend, "simulate", False),
-                        strict_timing=bool(getattr(self.params, "strict_timing", True)),
-                        **self._bidirectional_kwargs(
-                            -sub_phase_rate_turns if rev_sub_phase_rate_turns is None else rev_sub_phase_rate_turns
-                        ),
-                    )
+                    for rt in read_targets:
+                        cur_prog, cur_axes = build_program(
+                            machine,
+                            probe_qubit,
+                            drive_qubit,
+                            mode="benchmark",
+                            target_gate=target_gate,
+                            conditions=[cond],
+                            depths=d_batch,
+                            num_sequences=total_sequences,
+                            sequence_indices=s_chunk,
+                            num_shots=num_shots,
+                            cancel_amp=float(self.params.cancel_amp),
+                            init_phase=float(self.params.init_phase),
+                            sub_phase_rate_turns=sub_phase_rate_turns,
+                            reset_type=reset_type,
+                            use_state_discrimination=bool(self.params.use_state_discrimination),
+                            seed=self.params.seed,
+                            simulate=getattr(self.backend, "simulate", False),
+                            strict_timing=bool(getattr(self.params, "strict_timing", True)),
+                            **self._bidirectional_kwargs(
+                                -sub_phase_rate_turns if rev_sub_phase_rate_turns is None else rev_sub_phase_rate_turns
+                            ),
+                            read_target=rt,
+                        )
 
-                    ds_chunk = _acquire(
-                        machine,
-                        cur_prog,
-                        cur_axes,
-                        num_shots=num_shots,
-                        timeout=timeout,
-                        log=log,
-                        config=config,
-                    )
-                    seq_datasets.append(ds_chunk)
+                        ds_chunk = _acquire(
+                            machine,
+                            cur_prog,
+                            cur_axes,
+                            num_shots=num_shots,
+                            timeout=timeout,
+                            log=log,
+                            config=config,
+                        )
+                        seq_datasets[rt].append(ds_chunk)
 
-                ds_depth = xr.concat(seq_datasets, dim="sequence_idx")
+                per_target = [xr.concat(seq_datasets[rt], dim="sequence_idx") for rt in read_targets]
+                ds_depth = per_target[0] if len(per_target) == 1 else xr.concat(per_target, dim="qubit")
                 depth_datasets.append(ds_depth)
                 print(
                     f"# [Benchmark {current_step}/{total_steps}] "

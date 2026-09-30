@@ -456,7 +456,7 @@ def test_acquire_benchmark_bidirectional(monkeypatch):
         num_random_sequences=2, max_gates_per_batch=20,
     )
 
-    def run(bidirectional):
+    def run(bidirectional, **extra):
         calls = []
 
         def mock_acquire(m, p, s, **kw):
@@ -472,21 +472,26 @@ def test_acquire_benchmark_bidirectional(monkeypatch):
         monkeypatch.setattr(mod, "_acquire", mock_acquire)
         exp = QMCrosstalkCompensatedSQRB(
             SimpleNamespace(machine=mach, device=None),
-            CrosstalkCompensatedSQRBParameters(bidirectional=bidirectional, **params),
+            CrosstalkCompensatedSQRBParameters(bidirectional=bidirectional, **params, **extra),
         )
         res = exp._acquire_benchmark(mach, None, None, num_shots=1, probe_qubit=q1, drive_qubit=q2)
         return calls, res
 
     calls_uni, _ = run(False)
-    calls_bi, res_bi = run(True)
+    calls_sim, res_sim = run(True, readout_scheme="simultaneous")
+    calls_sep, res_sep = run(True)  # default: separate_passes
     assert all(c == ["q1"] for c in calls_uni)
-    assert all(c == ["q1", "q2"] for c in calls_bi)
+    assert all(c == ["q1", "q2"] for c in calls_sim)
     # depth 8 = 9 gates/seq: both sequences fit one chunk at a budget of 20, but bidirectional
     # doubles the load to 18 so each sequence gets its own chunk (3 conditions each)
     assert len(calls_uni) == 3
-    assert len(calls_bi) == 6
-    assert list(res_bi.coords["qubit"].values) == ["q1", "q2"]
-    assert list(res_bi.coords["sequence_idx"].values) == [0, 1]
+    assert len(calls_sim) == 6
+    # separate_passes: one single-qubit program per read target, interleaved chunk by chunk
+    assert calls_sep == [["q1"], ["q2"]] * 6
+    for res in (res_sim, res_sep):
+        assert list(res.coords["qubit"].values) == ["q1", "q2"]
+        assert list(res.coords["sequence_idx"].values) == [0, 1]
+        assert list(res.coords["condition"].values) == ["isolated", "simultaneous", "compensated"]
 
 
 @pytest.mark.parametrize("scheme, passes, reads", [
@@ -522,3 +527,14 @@ def test_sequential_readout_aligns_between_measurements():
     sim, _ = build_program(mach, q1, q2, mode="benchmark", conditions=["compensated"], depths=[1],
                            num_sequences=1, num_shots=1, bidirectional=True, readout_scheme="simultaneous")
     assert _script(seq).count("align()") == _script(sim).count("align()") + 1
+
+
+def test_read_target_builds_a_single_qubit_program():
+    mach, q1, q2, events = _recording_machine()
+    _, axes = build_program(mach, q1, q2, mode="benchmark", conditions=["isolated", "compensated"], depths=[1],
+                            num_sequences=1, num_shots=1, bidirectional=True, seed=3, read_target="drive")
+    assert list(axes["qubit"].values) == ["q2"]
+    assert [e[1] for e in events if e[0] == "measure"] == ["q2", "q2"]
+    # the isolated pass for the drive target plays the drive qubit only
+    first = events[: next(i for i, e in enumerate(events) if e[0] == "measure")]
+    assert {e[1] for e in first if e[0] in ("play", "wait")} == {"q2.xy"}
