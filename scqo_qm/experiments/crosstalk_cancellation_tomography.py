@@ -41,9 +41,18 @@ def build_program(
     reset_type: str = "thermal",
     use_state_discrimination: bool = False,
     simulate: bool = False,
+    bidirectional: bool = False,
+    drive_init_phase: float = 0.0,
 ):
-    """Build the QUA program for Crosstalk Cancellation Tomography."""
+    """Build the QUA program for Crosstalk Cancellation Tomography.
+
+    bidirectional: add the drive-line cancel element exactly as the bidirectional SQRB program
+    carries it (align, frame/IF reset, initial phase, and a frame step of -sub_p + wait per
+    pulse, which is what it does while the probe idles). It never plays a pulse here.
+    """
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
+    reverse_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
+    elems = [probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem] + ([reverse_elem] if reverse_elem else [])
 
     try:
         op_len = probe_qubit.xy.operations[target_gate].length
@@ -86,14 +95,14 @@ def build_program(
                         drive_qubit.reset(reset_type, simulate)
 
                         with strict_timing_():
-                            align(probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem)
-                            reset_frame(probe_qubit.xy.name)
-                            reset_frame(drive_qubit.xy.name)
-                            reset_frame(cancel_elem)
-                            reset_if_phase(probe_qubit.xy.name)
-                            reset_if_phase(drive_qubit.xy.name)
-                            reset_if_phase(cancel_elem)
+                            align(*elems)
+                            for el in elems:
+                                reset_frame(el)
+                            for el in elems:
+                                reset_if_phase(el)
                             reset_global_phase()
+                            if reverse_elem is not None:
+                                frame_rotation_2pi(float(drive_init_phase / (2.0 * np.pi)), reverse_elem)
 
                             # In cancel_only and compensated conditions, set initial phase on cancel_elem
                             if cond in ("cancel_only", "compensated"):
@@ -117,11 +126,15 @@ def build_program(
                                         play(target_gate * amp(amp_fixed), cancel_elem)
                                         if sub_p != 0.0:
                                             frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
+                                        if reverse_elem is not None:
+                                            if sub_p != 0.0:
+                                                frame_rotation_2pi(-sub_p, reverse_elem)
+                                            wait(pulse_cycles, reverse_elem)
                             else:
                                 wait(4, probe_qubit.xy.name)
 
                         # Strictly align probe with drive and cancel element before tomography basis pre-rotation
-                        align(probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem)
+                        align(*elems)
 
                         # Tomography basis pre-rotation on probe_qubit
                         b_lower = str(b_str).lower()
@@ -155,6 +168,7 @@ def build_program(
 
 
 from .crosstalk_compensated_benchmark import _patch_cancel_element
+from .crosstalk_compensated_sqrb import _patch_cancel_element as _patch_mirror_cancel_element
 from scqo_qm.experiments._lib import select_qubits
 
 
@@ -172,7 +186,14 @@ class CrosstalkCancellationTomography(_CoreTomography):
         q_dict = {q.name: q for q in qubits}
         probe_qubit = q_dict.get(probe_name, qubits[0])
         drive_qubit = q_dict.get(drive_name, qubits[1])
-        return _patch_cancel_element(config, probe_qubit, drive_qubit, self.params.target_gate)
+        return self._patch(config, probe_qubit, drive_qubit)
+
+    def _patch(self, config: dict, probe_qubit, drive_qubit) -> dict:
+        config = _patch_cancel_element(config, probe_qubit, drive_qubit, self.params.target_gate)
+        if self.params.bidirectional:
+            # the drive-line element exactly as the bidirectional SQRB config builds it
+            config = _patch_mirror_cancel_element(config, drive_qubit, probe_qubit, self.params.target_gate)
+        return config
 
     def preview_program(self):
         """Render a single representative program for preview without memory bloat or simulator timeouts."""
@@ -222,6 +243,8 @@ class CrosstalkCancellationTomography(_CoreTomography):
             reset_type=reset_type,
             use_state_discrimination=bool(self.params.use_state_discrimination),
             simulate=getattr(self.backend, "simulate", False),
+            bidirectional=bool(self.params.bidirectional),
+            drive_init_phase=float(self.params.drive_init_phase),
         )
         return prog
 
@@ -263,7 +286,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
 
         if config is None:
             config = machine.generate_config()
-        config = _patch_cancel_element(config, probe_qubit, drive_qubit, self.params.target_gate)
+        config = self._patch(config, probe_qubit, drive_qubit)
 
         reps = self.params.get_repetitions().tolist()
         conditions = self.params.get_conditions()
@@ -290,6 +313,8 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 reset_type=reset_type,
                 use_state_discrimination=use_sd,
                 simulate=getattr(self.backend, "simulate", False),
+                bidirectional=bool(self.params.bidirectional),
+                drive_init_phase=float(self.params.drive_init_phase),
             )
 
             return _acquire(
@@ -327,6 +352,8 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 reset_type=reset_type,
                 use_state_discrimination=use_sd,
                 simulate=getattr(self.backend, "simulate", False),
+                bidirectional=bool(self.params.bidirectional),
+                drive_init_phase=float(self.params.drive_init_phase),
             )
             ds_b = _acquire(
                 machine,
