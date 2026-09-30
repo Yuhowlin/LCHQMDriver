@@ -44,6 +44,7 @@ def build_program(
     bidirectional: bool = False,
     drive_init_phase: float = 0.0,
     drive_cancel_amp: float | None = None,
+    read_drive: bool = False,
 ):
     """Build the QUA program for Crosstalk Cancellation Tomography.
 
@@ -77,6 +78,11 @@ def build_program(
         if use_state_discrimination:
             state = [declare(int)]
             state_st = [declare_stream()]
+        if read_drive:
+            # diagnostic: the drive qubit is read in the same shot (its data is not fetched)
+            drive_state = declare(int)
+            drive_I, drive_Q = declare(fixed), declare(fixed)
+            drive_st = declare_stream()
 
         amp_fixed = declare(fixed)
         init_phase_fixed = declare(fixed)
@@ -157,8 +163,14 @@ def build_program(
                         if use_state_discrimination:
                             probe_qubit.readout_state(state[0])
                             save(state[0], state_st[0])
+                            if read_drive:
+                                drive_qubit.readout_state(drive_state)
+                                save(drive_state, drive_st)
                         else:
                             probe_qubit.resonator.measure("readout", qua_vars=(I[0], Q[0]))
+                            if read_drive:
+                                drive_qubit.resonator.measure("readout", qua_vars=(drive_I, drive_Q))
+                                save(drive_I, drive_st)
                             save(I[0], I_st[0])
                             save(Q[0], Q_st[0])
                         align()
@@ -253,6 +265,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
             bidirectional=bool(self.params.bidirectional),
             drive_init_phase=float(self.params.drive_init_phase),
             drive_cancel_amp=self.params.drive_cancel_amp,
+            read_drive=bool(self.params.read_drive),
         )
         return prog
 
@@ -324,6 +337,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 bidirectional=bool(self.params.bidirectional),
                 drive_init_phase=float(self.params.drive_init_phase),
                 drive_cancel_amp=self.params.drive_cancel_amp,
+                read_drive=bool(self.params.read_drive),
             )
 
             return _acquire(
@@ -364,6 +378,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 bidirectional=bool(self.params.bidirectional),
                 drive_init_phase=float(self.params.drive_init_phase),
                 drive_cancel_amp=self.params.drive_cancel_amp,
+                read_drive=bool(self.params.read_drive),
             )
             ds_b = _acquire(
                 machine,
