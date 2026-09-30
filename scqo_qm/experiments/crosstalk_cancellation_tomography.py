@@ -45,6 +45,7 @@ def build_program(
     drive_init_phase: float = 0.0,
     drive_cancel_amp: float | None = None,
     read_drive: bool = False,
+    stark_frame_rad: float = 0.0,
 ):
     """Build the QUA program for Crosstalk Cancellation Tomography.
 
@@ -128,11 +129,17 @@ def build_program(
                                         wait(pulse_cycles, drive_qubit.xy.name)
                                         play(target_gate * amp(amp_fixed), cancel_elem)
                                 elif cond == "compensated":
+                                    # virtual Z on the probe per aggressor pulse (x1/4 for a 90-type gate)
+                                    stark_turns = float(stark_frame_rad) / (2.0 * np.pi) * (
+                                        1.0 if "180" in target_gate else 0.25
+                                    )
                                     for _ in range(r_int):
                                         drive_qubit.xy.play(target_gate)
                                         play(target_gate * amp(amp_fixed), cancel_elem)
                                         if sub_p != 0.0:
                                             frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
+                                        if stark_turns != 0.0:
+                                            frame_rotation_2pi(stark_turns, probe_qubit.xy.name)
                                         if reverse_elem is not None:
                                             if drive_cancel_amp is None:
                                                 if sub_p != 0.0:
@@ -266,6 +273,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
             drive_init_phase=float(self.params.drive_init_phase),
             drive_cancel_amp=self.params.drive_cancel_amp,
             read_drive=bool(self.params.read_drive),
+            stark_frame_rad=float(self.params.stark_frame_rad),
         )
         return prog
 
@@ -338,6 +346,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 drive_init_phase=float(self.params.drive_init_phase),
                 drive_cancel_amp=self.params.drive_cancel_amp,
                 read_drive=bool(self.params.read_drive),
+                stark_frame_rad=float(self.params.stark_frame_rad),
             )
 
             return _acquire(
@@ -379,6 +388,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 drive_init_phase=float(self.params.drive_init_phase),
                 drive_cancel_amp=self.params.drive_cancel_amp,
                 read_drive=bool(self.params.read_drive),
+                stark_frame_rad=float(self.params.stark_frame_rad),
             )
             ds_b = _acquire(
                 machine,

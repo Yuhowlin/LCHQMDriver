@@ -561,3 +561,44 @@ def test_chunk_retry_on_transient_qop_error(monkeypatch):
     monkeypatch.setattr(mod, "_acquire", broken)
     with pytest.raises(ValueError):
         mod._acquire_chunk_with_retry(None, None, None, pause_s=0)
+
+
+def test_stark_frame_correction_follows_aggressor_pulses():
+    import re
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import generate_clifford_sequences
+
+    mach, q1, q2 = _mock_machine()
+    z = 2 * np.pi * 0.004  # turns 0.004 per 180-type aggressor pulse
+    prog, _ = build_program(
+        mach, q1, q2, mode="benchmark", conditions=["compensated"], depths=[3], num_sequences=1,
+        num_shots=1, cancel_amp=0.04, sub_phase_rate_turns=0.0, seed=11, bidirectional=True,
+        drive_cancel_amp=0.02, stark_frame_rad=z, drive_stark_frame_rad=2 * z, read_target="probe",
+    )
+    sc = _script(prog)
+
+    def total(elem):
+        return sum(float(v) for v in re.findall(rf'frame_rotation_2pi\(([-0-9.e]+), "{re.escape(elem)}"\)', sc))
+
+    def expected(gates):
+        tot = 0.0
+        for g in gates:
+            for slot in CLIFFORD_3SUBSLOTS[g]:
+                if slot is not None:
+                    tot += 1.0 if slot[1] == "x180" else 0.25
+        return tot
+
+    # the builder seeds the probe with `seed` and the drive with `seed + 1000`
+    probe_gates = generate_clifford_sequences(3, 1, seed=11)[0]
+    drive_gates = generate_clifford_sequences(3, 1, seed=1011)[0]
+    assert np.isclose(total("q1.xy"), 0.004 * expected(drive_gates))
+    assert np.isclose(total("q2.xy_cancel"), 0.004 * expected(drive_gates))
+    assert np.isclose(total("q2.xy"), 0.008 * expected(probe_gates))
+    assert np.isclose(total("q1.xy_cancel"), 0.008 * expected(probe_gates))
+
+
+def test_stark_frame_correction_only_when_compensated():
+    mach, q1, q2 = _mock_machine()
+    prog, _ = build_program(mach, q1, q2, mode="benchmark", conditions=["simultaneous"], depths=[3],
+                            num_sequences=1, num_shots=1, stark_frame_rad=0.1, seed=11)
+    assert 'frame_rotation_2pi(' not in _script(prog).split("reset_global_phase()", 1)[1].split("measure", 1)[0].replace(
+        'frame_rotation_2pi(v', '')

@@ -188,6 +188,11 @@ def _play_cancel_subslot(
             frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
 
 
+def _stark_scale(slot) -> float:
+    """AC-Stark-like Z per pulse relative to a 180-type pulse (quadratic in amplitude)."""
+    return 1.0 if slot[1] == "x180" else 0.25
+
+
 def play_simultaneous_clifford_subslots(
     gate_p: int,
     gate_d: int,
@@ -202,6 +207,8 @@ def play_simultaneous_clifford_subslots(
     reverse_cancel_elem_name: str | None = None,
     reverse_amp_val: float = 0.0,
     reverse_sub_phase_rate_turns: float = 0.0,
+    stark_turns_probe: float = 0.0,
+    stark_turns_drive: float = 0.0,
 ):
     """Play single Clifford gate decomposed into 3 fixed-duration subslots synchronously across channels.
 
@@ -212,6 +219,12 @@ def play_simultaneous_clifford_subslots(
     'simultaneous' (both) or 'compensated' (both + cancellation). Under 'compensated',
     cancel_elem_name mirrors the drive gate (drive -> probe crosstalk) and, when given,
     reverse_cancel_elem_name mirrors the probe gate (probe -> drive crosstalk).
+
+    Stark correction (compensated only): after every drive pulse the probe's frame turns by
+    stark_turns_probe (x 1/4 for a 90-type pulse: the shift goes as amplitude^2), and after
+    every probe pulse the drive's frame turns by stark_turns_drive. Turning a qubit's frame
+    also turns the phase of the crosstalk ITS pulses cause, so the cancel element mirroring
+    that qubit turns with it.
     """
     subslots_p = CLIFFORD_3SUBSLOTS[gate_p]
     subslots_d = CLIFFORD_3SUBSLOTS[gate_d]
@@ -245,6 +258,15 @@ def play_simultaneous_clifford_subslots(
                     reverse_sub_phase_rate_turns,
                     pulse_cycles,
                 )
+            if stark_turns_probe and subslots_d[slot_idx] is not None:
+                t = float(stark_turns_probe) * _stark_scale(subslots_d[slot_idx])
+                frame_rotation_2pi(t, probe_qubit.xy.name)
+                if reverse_cancel_elem_name is not None:
+                    frame_rotation_2pi(t, reverse_cancel_elem_name)
+            if stark_turns_drive and subslots_p[slot_idx] is not None:
+                t = float(stark_turns_drive) * _stark_scale(subslots_p[slot_idx])
+                frame_rotation_2pi(t, drive_qubit.xy.name)
+                frame_rotation_2pi(t, cancel_elem_name)
 
 
 CLIFFORD_PULSES: list[list[str]] = [
@@ -361,6 +383,8 @@ def build_program(
     read_both: bool | None = None,
     readout_scheme: str = "separate_passes",
     read_target: str | None = None,
+    stark_frame_rad: float = 0.0,
+    drive_stark_frame_rad: float = 0.0,
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -580,6 +604,10 @@ def build_program(
                                             reverse_cancel_elem_name=reverse_cancel_elem,
                                             reverse_amp_val=float(drive_cancel_amp),
                                             reverse_sub_phase_rate_turns=rev_sub_p,
+                                            stark_turns_probe=float(stark_frame_rad) / (2 * np.pi),
+                                            stark_turns_drive=(
+                                                float(drive_stark_frame_rad) / (2 * np.pi) if bidirectional else 0.0
+                                            ),
                                         )
 
                                 align()
@@ -791,6 +819,8 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             "reverse_track": self.params.reverse_track,
             "read_both": self.params.read_both,
             "readout_scheme": self.params.readout_scheme,
+            "stark_frame_rad": float(self.params.stark_frame_rad),
+            "drive_stark_frame_rad": float(self.params.drive_stark_frame_rad),
         }
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
