@@ -454,9 +454,10 @@ def _fpga_uses_merged(cond: str, dispatch: str) -> bool:
 def _play_fpga_merged(gc, elements):
     """One switch_ over gate_p * 24 + gate_d; every case plays all elements of the condition.
 
-    Each element's thread walks every switch_ of the loop body, so per-element switches cost
-    one dispatch per element per Clifford (~52 ns of gap per Clifford with 4 elements in the
-    QM simulator); a single switch costs one.
+    Experimental, not the default: written on the guess that the ~52 ns per-Clifford gap came
+    from one switch_ per element, but the QM simulator shows the same gap with a single
+    switch_ (isolated pass, 2026-10-01), so this is not its cause. Each switch is 576 cases x
+    up to 4 plays - heavy to compile on the shared gateway; never measured.
     """
     with switch_(gc, unsafe=True):
         for a in range(N_CLIFFORDS):
@@ -621,7 +622,7 @@ def build_program(
     cancel_tone: str = "victim",
     sequence_mode: str = "unrolled",
     fpga_unroll: int = 4,
-    fpga_dispatch: str = "merged",
+    fpga_dispatch: str = "per_element",
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 

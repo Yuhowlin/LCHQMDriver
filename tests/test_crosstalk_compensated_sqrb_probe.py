@@ -699,9 +699,10 @@ def test_fpga_benchmark_program_size_does_not_grow_with_depth(monkeypatch):
 
     small, deep = script([1, 4]), script([1, 4, 1024, 2000])
     assert small.count("play(") == deep.count("play(")
-    assert '"clif8"' not in deep and "with for_(" in deep
-    per_element = script([1, 4, 1024, 2000], fpga_dispatch="per_element")
-    assert '"clif23"' in per_element
+    assert '"clif23"' in deep and "with for_(" in deep
+    merged_small = script([1, 4], fpga_dispatch="merged")
+    merged_deep = script([1, 4, 1024, 2000], fpga_dispatch="merged")
+    assert merged_small.count("play(") == merged_deep.count("play(")
     for stream in ("I1", "I2"):
         assert f'"{stream}"' in deep
 
@@ -737,7 +738,7 @@ def test_fpga_merged_dispatch_uses_one_switch_over_both_gates(monkeypatch):
 
     # 3 Cliffords instead of 24: same structure, 9 cases instead of 576 (fast script dump)
     monkeypatch.setattr(mod, "N_CLIFFORDS", 3)
-    sc = _fpga_script(conditions=["compensated"])
+    sc = _fpga_script(conditions=["compensated"], fpga_dispatch="merged")
     # one switch per Clifford slot (loop, remainder, recovery), each with N*N cases
     # (the script renders switch_ as an if_/elif_ chain)
     assert sc.count("unsafe=True):") == 3
@@ -771,7 +772,8 @@ def test_fpga_builder_declares_only_the_arrays_its_passes_use(monkeypatch):
 
     monkeypatch.setattr(mod, "N_CLIFFORDS", 3)
     gp, gd = fpga_clifford_sequence(42, 0, 5), fpga_clifford_sequence(1042, 0, 5)
-    sim = _declared_int_arrays(_fpga_script(conditions=["simultaneous"], depths=[5], num_sequences=1))
+    sim = _declared_int_arrays(
+        _fpga_script(conditions=["simultaneous"], depths=[5], num_sequences=1, fpga_dispatch="merged"))
     assert [a * 3 + b for a, b in zip(gp, gd)] in sim
     assert gp not in sim and gd not in sim
     iso = _declared_int_arrays(_fpga_script(conditions=["isolated"], depths=[5], num_sequences=1))
