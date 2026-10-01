@@ -1521,43 +1521,28 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         )
         if fpga and self.params.fpga_sequence_source == "fpga_rng":
             # Sequences are drawn on the FPGA one at a time: no array-memory limit, so every
-            # condition, sequence and depth goes into ONE program (one per read target).
-            per_target = []
-            for rt in read_targets:
-                cur_prog, cur_axes = build_program(
-                    machine,
-                    probe_qubit,
-                    drive_qubit,
-                    mode="benchmark",
-                    target_gate=target_gate,
-                    conditions=benchmark_conditions,
-                    depths=all_depths,
-                    num_sequences=total_sequences,
-                    num_shots=num_shots,
-                    cancel_amp=float(self.params.cancel_amp),
-                    init_phase=float(self.params.init_phase),
-                    sub_phase_rate_turns=sub_phase_rate_turns,
-                    reset_type=reset_type,
-                    use_state_discrimination=bool(self.params.use_state_discrimination),
-                    seed=self.params.seed,
-                    simulate=getattr(self.backend, "simulate", False),
-                    strict_timing=bool(getattr(self.params, "strict_timing", True)),
-                    **self._bidirectional_kwargs(
-                        -sub_phase_rate_turns if rev_sub_phase_rate_turns is None else rev_sub_phase_rate_turns
-                    ),
-                    read_target=rt,
-                )
-                per_target.append(
-                    _acquire_chunk_with_retry(
-                        machine, cur_prog, cur_axes, num_shots=num_shots, timeout=timeout, log=log, config=config
-                    )
+            # sequence and depth of a condition goes into ONE program (per read target).
+            # Conditions stay separate programs: with all three in one program, q1's
+            # simultaneous/compensated RB decayed to ~1/3 instead of 1/2 on chipQM
+            # (20261001-154917-205; the same condition alone was normal, -160022-543).
+            cond_datasets_rng = []
+            for cond in benchmark_conditions:
+                per_target = []
+                for rt in read_targets:
+                    per_target.append(self._acquire_fpga_rng_program(
+                        machine, probe_qubit, drive_qubit, cond, rt, all_depths, total_sequences,
+                        num_shots=num_shots, timeout=timeout, log=log, config=config, reset_type=reset_type,
+                        sub_phase_rate_turns=sub_phase_rate_turns, rev_sub_phase_rate_turns=rev_sub_phase_rate_turns,
+                        target_gate=target_gate,
+                    ))
+                cond_datasets_rng.append(
+                    per_target[0] if len(per_target) == 1 else xr.concat(per_target, dim="qubit")
                 )
                 print(
-                    f"# [Benchmark fpga_rng] {len(benchmark_conditions)} condition(s) x {total_sequences} "
-                    f"sequences x {len(all_depths)} depths in one program"
-                    + (f" (read {rt})" if rt else "") + " completed."
+                    f"# [Benchmark fpga_rng] condition '{cond}': {total_sequences} sequences x "
+                    f"{len(all_depths)} depths in one program completed."
                 )
-            return per_target[0] if len(per_target) == 1 else xr.concat(per_target, dim="qubit")
+            return xr.concat(cond_datasets_rng, dim="condition")
 
         total_steps = len(benchmark_conditions) * len(depth_batches)
         current_step = 0
@@ -1648,6 +1633,53 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
 
         total_ds = xr.concat(cond_datasets, dim="condition")
         return total_ds
+
+    def _acquire_fpga_rng_program(
+        self,
+        machine,
+        probe_qubit,
+        drive_qubit,
+        cond: str,
+        read_target: str | None,
+        depths: list,
+        num_sequences: int,
+        *,
+        num_shots: int,
+        timeout: float,
+        log: bool,
+        config: Optional[dict],
+        reset_type: str,
+        sub_phase_rate_turns: float,
+        rev_sub_phase_rate_turns: float | None,
+        target_gate: str,
+    ) -> xr.Dataset:
+        """One fpga_rng program: every sequence and depth of one condition (one read target)."""
+        prog, axes = build_program(
+            machine,
+            probe_qubit,
+            drive_qubit,
+            mode="benchmark",
+            target_gate=target_gate,
+            conditions=[cond],
+            depths=depths,
+            num_sequences=num_sequences,
+            num_shots=num_shots,
+            cancel_amp=float(self.params.cancel_amp),
+            init_phase=float(self.params.init_phase),
+            sub_phase_rate_turns=sub_phase_rate_turns,
+            reset_type=reset_type,
+            use_state_discrimination=bool(self.params.use_state_discrimination),
+            seed=self.params.seed,
+            simulate=getattr(self.backend, "simulate", False),
+            strict_timing=bool(getattr(self.params, "strict_timing", True)),
+            **self._bidirectional_kwargs(
+                -sub_phase_rate_turns if rev_sub_phase_rate_turns is None else rev_sub_phase_rate_turns
+            ),
+            read_target=read_target,
+        )
+        return _acquire_chunk_with_retry(
+            machine, prog, axes, num_shots=num_shots, timeout=timeout, log=log, config=config
+        )
 
     def _acquire_calibrate(
         self,

@@ -819,7 +819,7 @@ def test_fpga_rng_draws_each_sequence_on_the_fpga():
     assert sorted(len(a) for a in arrays) == [2, 24, 576]
 
 
-def test_fpga_rng_acquires_every_condition_and_sequence_in_one_program(monkeypatch):
+def test_fpga_rng_acquires_each_condition_in_one_program(monkeypatch):
     import xarray as xr
     from scqo.experiments.crosstalk_compensated_sqrb import CrosstalkCompensatedSQRBParameters
     import scqo_qm.experiments.crosstalk_compensated_sqrb as mod
@@ -849,8 +849,10 @@ def test_fpga_rng_acquires_every_condition_and_sequence_in_one_program(monkeypat
         return calls, res
 
     calls, res = run(readout_scheme="simultaneous")
-    assert calls == [(["q1", "q2"], [2, 3, 30, 3])]  # ONE program
+    # one program per condition, each with all 30 sequences and all depths
+    assert calls == [(["q1", "q2"], [2, 1, 30, 3])] * 3
     assert dict(res.sizes) == {"qubit": 2, "condition": 3, "sequence_idx": 30, "depth": 3}
+    assert list(res.coords["condition"].values) == ["isolated", "simultaneous", "compensated"]
     calls, res = run(readout_scheme="separate_passes")
-    assert calls == [(["q1"], [1, 3, 30, 3]), (["q2"], [1, 3, 30, 3])]  # one per read target
+    assert calls == [(["q1"], [1, 1, 30, 3]), (["q2"], [1, 1, 30, 3])] * 3  # per read target
     assert list(res.coords["qubit"].values) == ["q1", "q2"]
