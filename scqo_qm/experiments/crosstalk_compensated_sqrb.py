@@ -1134,9 +1134,14 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
         target_gate = getattr(self.params, "target_gate", "x180")
         tone = self.params.cancel_tone
-        config = _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate, tone=tone)
+        pairs = [(probe_qubit, drive_qubit)]
         if self.params.uses_reverse_track():
-            config = _patch_cancel_element(config, drive_qubit, probe_qubit, target_gate, tone=tone)
+            pairs.append((drive_qubit, probe_qubit))
+        # Cancel elements take the next free FEM core in creation order and the phase reference
+        # is per core: create them in victim-name order so the bidirectional tomography
+        # (same rule) calibrates each element on the core it runs on here.
+        for victim, aggressor in sorted(pairs, key=lambda p: p[0].xy.name):
+            config = _patch_cancel_element(config, victim, aggressor, target_gate, tone=tone)
         if self.params.sequence_mode == "fpga" and self.params.mode == "benchmark":
             config = _patch_composite_cliffords(config, probe_qubit.xy.name)
             config = _patch_composite_cliffords(config, drive_qubit.xy.name)

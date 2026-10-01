@@ -234,6 +234,13 @@ class CrosstalkCancellationTomography(_CoreTomography):
 
     def _patch(self, config: dict, probe_qubit, drive_qubit) -> dict:
         tone = self.params.cancel_tone
+        if self.params.bidirectional and drive_qubit.xy.name < probe_qubit.xy.name:
+            # Cancel elements take the next free FEM core in creation order, and the phase
+            # reference is per core: create them in victim-name order, as the bidirectional SQRB
+            # does for its usual probe/drive order, so each element sits on the same core.
+            config = _patch_mirror_cancel_element(
+                config, drive_qubit, probe_qubit, self.params.target_gate, tone=tone
+            )
         if tone == "victim":
             config = _patch_cancel_element(config, probe_qubit, drive_qubit, self.params.target_gate)
         else:
