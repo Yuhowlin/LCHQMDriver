@@ -414,7 +414,7 @@ def _declare_fpga_sequences(
         out[f"g_inv_{key}"] = declare(int)
     out["depths"] = declare(int, value=[int(d) for d in depth_arr])
     out["seq_ids"] = declare(int, value=[int(s) for s in seq_arr])
-    for name in ("s", "j", "k", "d", "base", "k_end"):
+    for name in ("s", "j", "k", "d", "base", "k_end", "k_stop"):
         out[name] = declare(int)
     # one loop variable per element for dispatch='parallel' (each element loops on its own)
     out["k_el"] = [declare(int) for _ in range(4)]
@@ -456,7 +456,7 @@ def _declare_fpga_rng(depth_arr, seq_arr, *, seed: int | None, unroll: int, arra
     # (seed, first sequence index), so every condition replays the same sequences
     out["rand"] = Random(seed=(seed if seed is not None else 42) + 7919 * seq_ids[0])
     out["depths"] = declare(int, value=depths)
-    for name in ("s", "j", "k", "d", "base", "k_end"):
+    for name in ("s", "j", "k", "d", "base", "k_end", "k_stop"):
         out[name] = declare(int)
     out["k_el"] = [declare(int) for _ in range(4)]
     return out
@@ -593,6 +593,9 @@ def _play_benchmark_fpga(
             assign(base, s * d_max)
         with for_(j, 0, j < n_d, j + 1):
             assign(d, fpga["depths"][j])
+            # loop bound once per depth: a `kk < base + d` condition costs one extra cycle per
+            # Clifford (52 instead of 48 ns on chipQM hardware, timestamp_stream 2026-10-01)
+            assign(fpga["k_stop"], base + d)
             for key in keys:
                 if not rng:
                     assign(fpga[f"g_inv_{key}"], fpga[f"inv_{key}"][s * n_d + j])
@@ -631,7 +634,7 @@ def _play_benchmark_fpga(
                         for idx, (element, src, scale) in enumerate(elements_par):
                             kk = fpga["k_el"][idx]
                             gates = fpga[f"gates_{src}"]
-                            with for_(kk, base, kk < base + d, kk + 1):
+                            with for_(kk, base, kk < fpga["k_stop"], kk + 1):
                                 _play_composite(gates[kk], element, scale)
                             _play_composite(fpga[f"g_inv_{src}"], element, scale)
                             if debug_timestamps:
@@ -659,7 +662,7 @@ def _play_benchmark_fpga(
                         # Index the arrays with the loop variable itself: on chipQM hardware
                         # (timestamp_stream, 2026-10-01) this plays 48 ns Cliffords back to back,
                         # while a computed index (gates[k + u]) costs ~50-70 ns per Clifford.
-                        with for_(k, base, k < base + d, k + 1):
+                        with for_(k, base, k < fpga["k_stop"], k + 1):
                             clifford(k)
                     else:
                         # unrolled-by-`unroll` loop over the sequence, then the remainder
