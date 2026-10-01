@@ -739,14 +739,14 @@ def test_fpga_merged_dispatch_uses_one_switch_over_both_gates(monkeypatch):
     # 3 Cliffords instead of 24: same structure, 9 cases instead of 576 (fast script dump)
     monkeypatch.setattr(mod, "N_CLIFFORDS", 3)
     sc = _fpga_script(conditions=["compensated"], fpga_dispatch="merged")
-    # one switch per Clifford slot (loop, remainder, recovery), each with N*N cases
+    # one switch for the loop and one for the recovery, each with N*N cases
     # (the script renders switch_ as an if_/elif_ chain)
-    assert sc.count("unsafe=True):") == 3
-    assert sc.count("==8))") == 3 and "==9))" not in sc
+    assert sc.count("unsafe=True):") == 2
+    assert sc.count("==8))") == 2 and "==9))" not in sc
     # every case plays all four elements
     plays = [line.strip() for line in sc.splitlines() if line.strip().startswith("play(")]
     for elem in ("q1.xy", "q2.xy", "q1.xy_cancel", "q2.xy_cancel"):
-        assert sum(line.endswith(f'"{elem}")') for line in plays) == 3 * 9
+        assert sum(line.endswith(f'"{elem}")') for line in plays) == 2 * 9
 
 
 def test_fpga_merged_index_is_probe_times_24_plus_drive():
@@ -782,6 +782,26 @@ def test_fpga_builder_declares_only_the_arrays_its_passes_use(monkeypatch):
 
 def test_fpga_per_element_dispatch_and_isolated_use_per_qubit_switches():
     sc = _fpga_script(conditions=["compensated"], fpga_dispatch="per_element")
-    assert sc.count("unsafe=True):") == 3 * 4 and "==575))" not in sc
+    assert sc.count("unsafe=True):") == 2 * 4 and "==575))" not in sc  # loop + recovery per element
     sc = _fpga_script(conditions=["isolated"])  # probe pass + drive pass, one element each
-    assert sc.count("unsafe=True):") == 3 * 2 and "==575))" not in sc
+    assert sc.count("unsafe=True):") == 2 * 2 and "==575))" not in sc
+
+
+def test_fpga_parallel_dispatch_gives_every_element_its_own_loop():
+    import re
+
+    sc = _fpga_script(conditions=["compensated"])  # default dispatch: parallel
+    # each element loop: `with for_(vN,...)` whose body starts with that element's switch_ cases
+    lines = sc.splitlines()
+    elem_loops = []
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*with for_\((v\d+),", line)
+        if m:
+            window = " ".join(ln for ln in lines[i + 1:i + 4] if "play(" in ln)
+            for elem in ("q1.xy_cancel", "q2.xy_cancel", "q1.xy", "q2.xy"):
+                if f'"{elem}")' in window:
+                    elem_loops.append((m.group(1), elem))
+                    break
+    assert sorted(e for _, e in elem_loops) == ["q1.xy", "q1.xy_cancel", "q2.xy", "q2.xy_cancel"]
+    assert len({v for v, _ in elem_loops}) == 4  # its own loop variable each
+    assert sc.count("unsafe=True):") == 2 * 4  # loop + recovery switch per element

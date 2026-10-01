@@ -416,6 +416,8 @@ def _declare_fpga_sequences(
     out["seq_ids"] = declare(int, value=[int(s) for s in seq_arr])
     for name in ("s", "j", "k", "d", "base", "k_end"):
         out[name] = declare(int)
+    # one loop variable per element for dispatch='parallel' (each element loops on its own)
+    out["k_el"] = [declare(int) for _ in range(4)]
     return out
 
 
@@ -501,7 +503,7 @@ def _play_benchmark_fpga(
     simulate,
     use_state_discrimination,
     I, Q, I_st, Q_st, n, m, m_st, state=None, state_st=None,
-    dispatch: str = "merged",
+    dispatch: str = "parallel",
 ):
     """sequence_mode='fpga' body of one condition: QUA loops over sequence, depth and shot.
 
@@ -522,6 +524,8 @@ def _play_benchmark_fpga(
     with for_(s, 0, s < fpga["n_s"], s + 1):
         assign(m, fpga["seq_ids"][s])
         save(m, m_st)
+        # first gate of this sequence in the flat arrays; set here, outside the timed block
+        assign(base, s * d_max)
         with for_(j, 0, j < n_d, j + 1):
             assign(d, fpga["depths"][j])
             for key in keys:
@@ -542,7 +546,21 @@ def _play_benchmark_fpga(
                         frame_rotation_2pi(drive_init_phase / (2 * np.pi), reverse_cancel_elem)
                     align(*xy_elems)
 
-                    if _fpga_uses_merged(play_cond, dispatch):
+                    if dispatch == "parallel":
+                        # One FPGA loop per element, each indexing the gate array with its own
+                        # loop variable: every loop is a single-element thread, so the loops run
+                        # side by side from the align above and Clifford i starts at the same
+                        # time on every element. On chipQM hardware (timestamp_stream,
+                        # 2026-10-01) this plays 48 ns Cliffords back to back on all 4
+                        # elements; the same 4 switches in ONE shared loop took 160 ns each.
+                        for idx, (element, src, scale) in enumerate(_fpga_elements(play_cond, **kw)):
+                            kk = fpga["k_el"][idx]
+                            gates = fpga[f"gates_{src}"]
+                            with for_(kk, base, kk < base + d, kk + 1):
+                                _play_composite(gates[kk], element, scale)
+                            _play_composite(fpga[f"g_inv_{src}"], element, scale)
+                        clifford = recovery = None
+                    elif _fpga_uses_merged(play_cond, dispatch):
                         elements = _fpga_elements(play_cond, **kw)
                         gates_c = fpga["gates_c"]
                         clifford = lambda i: _play_fpga_merged(gates_c[i], elements)  # noqa: E731
@@ -558,15 +576,24 @@ def _play_benchmark_fpga(
                             fpga.get("g_inv_p"), fpga.get("g_inv_d"), cond=play_cond, **kw
                         )
 
-                    # unrolled-by-`unroll` loop over the sequence, then the remainder, then recovery
-                    assign(base, s * d_max)
-                    assign(k_end, base + d - (unroll - 1))
-                    with for_(k, base, k < k_end, k + unroll):
-                        for u in range(unroll):
-                            clifford(k + u)
-                    with for_(k, k, k < base + d, k + 1):
-                        clifford(k)
-                    recovery()
+                    if clifford is None:
+                        pass  # dispatch='parallel' played above
+                    elif unroll == 1:
+                        # Index the arrays with the loop variable itself: on chipQM hardware
+                        # (timestamp_stream, 2026-10-01) this plays 48 ns Cliffords back to back,
+                        # while a computed index (gates[k + u]) costs ~50-70 ns per Clifford.
+                        with for_(k, base, k < base + d, k + 1):
+                            clifford(k)
+                    else:
+                        # unrolled-by-`unroll` loop over the sequence, then the remainder
+                        assign(k_end, base + d - (unroll - 1))
+                        with for_(k, base, k < k_end, k + unroll):
+                            for u in range(unroll):
+                                clifford(k if u == 0 else k + u)
+                        with for_(k, k, k < base + d, k + 1):
+                            clifford(k)
+                    if recovery is not None:
+                        recovery()
 
                     align()
                     for jj, i in enumerate(read_idx):
@@ -621,8 +648,8 @@ def build_program(
     phase_reset: str = "global",
     cancel_tone: str = "victim",
     sequence_mode: str = "unrolled",
-    fpga_unroll: int = 4,
-    fpga_dispatch: str = "per_element",
+    fpga_unroll: int = 1,
+    fpga_dispatch: str = "parallel",
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -648,7 +675,7 @@ def build_program(
         raise ValueError(f"unknown phase_reset {phase_reset!r}")
     if sequence_mode not in ("unrolled", "fpga"):
         raise ValueError(f"unknown sequence_mode {sequence_mode!r}")
-    if fpga_dispatch not in ("merged", "per_element"):
+    if fpga_dispatch not in ("parallel", "per_element", "merged"):
         raise ValueError(f"unknown fpga_dispatch {fpga_dispatch!r}")
     aggressor_tone = cancel_tone == "aggressor"
     depth_arr = np.asarray(depths, dtype=int) if depths is not None else np.array([4])
