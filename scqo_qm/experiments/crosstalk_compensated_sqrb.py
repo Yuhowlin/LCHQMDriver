@@ -452,7 +452,9 @@ def _declare_fpga_rng(depth_arr, seq_arr, *, seed: int | None, unroll: int, arra
         out["g_inv_c"] = declare(int)
     out["step"] = declare(int)
     out["i_gen"] = declare(int)
-    out["rand"] = Random(seed=seed if seed is not None else 42)
+    # each program of a chunked run starts its own stream: the sequences of a chunk depend only on
+    # (seed, first sequence index), so every condition replays the same sequences
+    out["rand"] = Random(seed=(seed if seed is not None else 42) + 7919 * seq_ids[0])
     out["depths"] = declare(int, value=depths)
     for name in ("s", "j", "k", "d", "base", "k_end"):
         out[name] = declare(int)
@@ -559,6 +561,7 @@ def _play_benchmark_fpga(
     use_state_discrimination,
     I, Q, I_st, Q_st, n, m, m_st, state=None, state_st=None,
     dispatch: str = "parallel",
+    debug_timestamps: bool = False,
 ):
     """sequence_mode='fpga' body of one condition: QUA loops over sequence, depth and shot.
 
@@ -620,12 +623,19 @@ def _play_benchmark_fpga(
                         # time on every element. On chipQM hardware (timestamp_stream,
                         # 2026-10-01) this plays 48 ns Cliffords back to back on all 4
                         # elements; the same 4 switches in ONE shared loop took 160 ns each.
-                        for idx, (element, src, scale) in enumerate(_fpga_elements(play_cond, **kw)):
+                        elements_par = _fpga_elements(play_cond, **kw)
+                        if debug_timestamps:
+                            # zero-amplitude markers: when each element's loop starts / ends (4 ns cycles)
+                            for element, _, _ in elements_par:
+                                play("x180" * amp(0.0), element, timestamp_stream=f"ts0_{play_cond}_{element}")
+                        for idx, (element, src, scale) in enumerate(elements_par):
                             kk = fpga["k_el"][idx]
                             gates = fpga[f"gates_{src}"]
                             with for_(kk, base, kk < base + d, kk + 1):
                                 _play_composite(gates[kk], element, scale)
                             _play_composite(fpga[f"g_inv_{src}"], element, scale)
+                            if debug_timestamps:
+                                play("x180" * amp(0.0), element, timestamp_stream=f"ts1_{play_cond}_{element}")
                         clifford = recovery = None
                     elif _fpga_uses_merged(play_cond, dispatch):
                         elements = _fpga_elements(play_cond, **kw)
@@ -717,7 +727,8 @@ def build_program(
     sequence_mode: str = "unrolled",
     fpga_unroll: int = 1,
     fpga_dispatch: str = "parallel",
-    fpga_sequence_source: str = "fpga_rng",
+    fpga_sequence_source: str = "host",
+    debug_timestamps: bool = False,
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -996,6 +1007,7 @@ def build_program(
                         state=state if use_state_discrimination else None,
                         state_st=state_st if use_state_discrimination else None,
                         dispatch=fpga_dispatch,
+                        debug_timestamps=debug_timestamps,
                     )
                     continue
 
@@ -1520,27 +1532,31 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             else [None]
         )
         if fpga and self.params.fpga_sequence_source == "fpga_rng":
-            # Sequences are drawn on the FPGA one at a time: no array-memory limit, so every
-            # sequence and depth of a condition goes into ONE program (per read target).
-            # Conditions stay separate programs: with all three in one program, q1's
-            # simultaneous/compensated RB decayed to ~1/3 instead of 1/2 on chipQM
-            # (20261001-154917-205; the same condition alone was normal, -160022-543).
+            # Sequences are drawn on the FPGA one at a time, so memory does not limit a program,
+            # but program DURATION must stay short: within one long program the cross-line
+            # (simultaneous / compensated) error grows with run time on chipQM - per-sequence
+            # error rose steadily over a 30-sequence program (20261001-160313-164) while 7-sequence
+            # programs stayed flat (-161549-497). Cause not identified. So conditions are
+            # separate programs and each holds fpga_sequences_per_program sequences.
+            per_prog = max(1, int(self.params.fpga_sequences_per_program))
+            chunks = [list(range(i, min(i + per_prog, total_sequences))) for i in range(0, total_sequences, per_prog)]
             cond_datasets_rng = []
             for cond in benchmark_conditions:
-                per_target = []
-                for rt in read_targets:
-                    per_target.append(self._acquire_fpga_rng_program(
-                        machine, probe_qubit, drive_qubit, cond, rt, all_depths, total_sequences,
-                        num_shots=num_shots, timeout=timeout, log=log, config=config, reset_type=reset_type,
-                        sub_phase_rate_turns=sub_phase_rate_turns, rev_sub_phase_rate_turns=rev_sub_phase_rate_turns,
-                        target_gate=target_gate,
-                    ))
-                cond_datasets_rng.append(
-                    per_target[0] if len(per_target) == 1 else xr.concat(per_target, dim="qubit")
-                )
+                chunk_sets = []
+                for chunk in chunks:
+                    per_target = []
+                    for rt in read_targets:
+                        per_target.append(self._acquire_fpga_rng_program(
+                            machine, probe_qubit, drive_qubit, cond, rt, all_depths, chunk,
+                            num_shots=num_shots, timeout=timeout, log=log, config=config, reset_type=reset_type,
+                            sub_phase_rate_turns=sub_phase_rate_turns, rev_sub_phase_rate_turns=rev_sub_phase_rate_turns,
+                            target_gate=target_gate,
+                        ))
+                    chunk_sets.append(per_target[0] if len(per_target) == 1 else xr.concat(per_target, dim="qubit"))
+                cond_datasets_rng.append(xr.concat(chunk_sets, dim="sequence_idx"))
                 print(
                     f"# [Benchmark fpga_rng] condition '{cond}': {total_sequences} sequences x "
-                    f"{len(all_depths)} depths in one program completed."
+                    f"{len(all_depths)} depths in {len(chunks)} program(s) completed."
                 )
             return xr.concat(cond_datasets_rng, dim="condition")
 
@@ -1561,9 +1577,15 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                 if fixed_seq_batch_size is not None and int(fixed_seq_batch_size) > 0:
                     seq_chunk_size = int(fixed_seq_batch_size)
                 elif fpga:
-                    # bounded by the QUA array memory: two gate arrays of max depth per sequence
+                    # bounded by the QUA array memory (two gate arrays of max depth per sequence)
+                    # and by program duration (fpga_sequences_per_program)
                     seq_chunk_size = max(
-                        1, min(total_sequences, int(self.params.fpga_max_array_gates) // (2 * max_d))
+                        1,
+                        min(
+                            total_sequences,
+                            int(self.params.fpga_max_array_gates) // (2 * max_d),
+                            int(self.params.fpga_sequences_per_program),
+                        ),
                     )
                 else:
                     seq_chunk_size = max(1, min(total_sequences, max_gates // gates_per_seq))
@@ -1642,7 +1664,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         cond: str,
         read_target: str | None,
         depths: list,
-        num_sequences: int,
+        sequence_indices: list,
         *,
         num_shots: int,
         timeout: float,
@@ -1653,7 +1675,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         rev_sub_phase_rate_turns: float | None,
         target_gate: str,
     ) -> xr.Dataset:
-        """One fpga_rng program: every sequence and depth of one condition (one read target)."""
+        """One fpga_rng program: the given sequences x every depth of one condition (one read target)."""
         prog, axes = build_program(
             machine,
             probe_qubit,
@@ -1662,7 +1684,8 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             target_gate=target_gate,
             conditions=[cond],
             depths=depths,
-            num_sequences=num_sequences,
+            num_sequences=int(max(sequence_indices)) + 1,
+            sequence_indices=sequence_indices,
             num_shots=num_shots,
             cancel_amp=float(self.params.cancel_amp),
             init_phase=float(self.params.init_phase),
