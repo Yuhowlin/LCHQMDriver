@@ -602,3 +602,111 @@ def test_stark_frame_correction_only_when_compensated():
                             num_sequences=1, num_shots=1, stark_frame_rad=0.1, seed=11)
     assert 'frame_rotation_2pi(' not in _script(prog).split("reset_global_phase()", 1)[1].split("measure", 1)[0].replace(
         'frame_rotation_2pi(v', '')
+
+
+def test_phase_reset_if_only_drops_global_phase_reset():
+    mach, q1, q2 = _mock_machine()
+    for mode, kw in (("benchmark", dict(depths=[1], num_sequences=1)),
+                     ("calibrate", dict(cancel_amps=[0.01], init_phases=[0.0], cal_stage_repetitions=[2]))):
+        sc_global = _script(build_program(mach, q1, q2, mode=mode, num_shots=1, **kw)[0])
+        sc_if = _script(build_program(mach, q1, q2, mode=mode, num_shots=1, phase_reset="if_only", **kw)[0])
+        assert "reset_global_phase()" in sc_global
+        assert "reset_global_phase()" not in sc_if
+        assert 'reset_if_phase("q1.xy_cancel")' in sc_if
+
+
+def test_aggressor_tone_cancel_element_moves_to_aggressor_frequency():
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import _patch_cancel_element
+
+    mach, q1, q2 = _mock_machine()
+    q1.xy.RF_frequency, q2.xy.RF_frequency = 5.143e9, 5.191e9
+    cfg = _two_line_config()
+    cfg["elements"]["q1.xy"]["intermediate_frequency"] = 243e6
+    out = _patch_cancel_element(cfg, q1, q2, "x180", tone="aggressor")
+    assert np.isclose(out["elements"]["q1.xy_cancel"]["intermediate_frequency"], 243e6 + 48e6)
+    assert out["elements"]["q1.xy"]["intermediate_frequency"] == 243e6
+    q2.xy.RF_frequency = 5.6e9
+    cfg = _two_line_config()
+    cfg["elements"]["q1.xy"]["intermediate_frequency"] = 243e6
+    with pytest.raises(ValueError, match="400 MHz"):
+        _patch_cancel_element(cfg, q1, q2, "x180", tone="aggressor")
+
+
+def test_aggressor_tone_benchmark_has_no_cancel_frame_steps():
+    import re
+
+    mach, q1, q2 = _mock_machine()
+    prog, _ = build_program(
+        mach, q1, q2, mode="benchmark", conditions=["compensated"], depths=[4], num_sequences=1,
+        num_shots=1, cancel_amp=0.03, init_phase=0.0, sub_phase_rate_turns=0.1, bidirectional=True,
+        drive_cancel_amp=0.02, cancel_tone="aggressor", read_target="probe",
+    )
+    rots = re.findall(r'frame_rotation_2pi\(([-0-9.e]+), "(q[12]\.xy_cancel)"\)', _script(prog))
+    assert all(float(v) == 0.0 for v, _ in rots)  # only the (zero) initial phases
+
+
+def test_composite_cliffords_concatenate_the_three_subslots():
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import _patch_composite_cliffords
+
+    n = 4
+    shapes = {"x180": 1.0, "y180": 1j, "x90": 0.5, "-x90": -0.5, "y90": 0.5j, "-y90": -0.5j}
+    cfg = {"elements": {"q.xy": {"operations": {}}, "a.xy": {"operations": {}}}, "pulses": {}, "waveforms": {}}
+    for op, z in shapes.items():
+        cfg["waveforms"][f"{op}.I"] = {"type": "constant", "sample": float(np.real(z))}
+        cfg["waveforms"][f"{op}.Q"] = {"type": "arbitrary", "samples": [float(np.imag(z))] * n}
+        cfg["pulses"][f"{op}.p"] = {"operation": "control", "length": n, "waveforms": {"I": f"{op}.I", "Q": f"{op}.Q"}}
+        cfg["elements"]["a.xy"]["operations"][op] = f"{op}.p"
+    _patch_composite_cliffords(cfg, "q.xy", "a.xy")
+    for g, subslots in enumerate(CLIFFORD_3SUBSLOTS):
+        pulse = cfg["pulses"][cfg["elements"]["q.xy"]["operations"][f"clif{g}"]]
+        assert pulse["length"] == 3 * n
+        z = np.asarray(cfg["waveforms"][pulse["waveforms"]["I"]]["samples"]) + 1j * np.asarray(
+            cfg["waveforms"][pulse["waveforms"]["Q"]]["samples"])
+        for j, slot in enumerate(subslots):
+            want = 0.0 if slot is None else shapes[slot[0]]
+            assert np.allclose(z[j * n:(j + 1) * n], want)
+
+
+def test_fpga_sequences_are_prefixes_with_correct_recovery():
+    from qualang_tools.bakery.randomized_benchmark_c1 import c1_table
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import fpga_clifford_sequence, fpga_recovery_gates
+
+    gates = fpga_clifford_sequence(42, 3, 200)
+    assert gates[:50] == fpga_clifford_sequence(42, 3, 50)
+    assert gates != fpga_clifford_sequence(42, 4, 200)
+    depths = [0, 1, 7, 128, 200]
+    for d, inv in zip(depths, fpga_recovery_gates(gates, depths)):
+        state = 0
+        for g in gates[:d] + [inv]:
+            state = int(c1_table[state, g])
+        assert state == 0
+
+
+def test_fpga_benchmark_program_size_does_not_grow_with_depth():
+    mach, q1, q2 = _mock_machine()
+
+    def script(depths):
+        prog, axes = build_program(
+            mach, q1, q2, mode="benchmark", depths=depths, num_sequences=2, num_shots=3,
+            conditions=["compensated"], cancel_amp=0.03, bidirectional=True, drive_cancel_amp=0.02,
+            readout_scheme="simultaneous", phase_reset="if_only", cancel_tone="aggressor",
+            sequence_mode="fpga",
+        )
+        assert list(axes["depth"].values) == list(depths)
+        return _script(prog)
+
+    small, deep = script([1, 4]), script([1, 4, 1024, 2000])
+    assert small.count("play(") == deep.count("play(")
+    assert '"clif23"' in deep and "with for_(" in deep
+    for stream in ("I1", "I2"):
+        assert f'"{stream}"' in deep
+
+
+def test_fpga_mode_refuses_victim_tone_compensation():
+    mach, q1, q2 = _mock_machine()
+    with pytest.raises(ValueError, match="cancel_tone='aggressor'"):
+        build_program(mach, q1, q2, mode="benchmark", depths=[4], num_sequences=1, num_shots=1,
+                      conditions=["compensated"], sequence_mode="fpga")
+    # no compensation: the victim tone is never played, fine
+    build_program(mach, q1, q2, mode="benchmark", depths=[4], num_sequences=1, num_shots=1,
+                  conditions=["isolated", "simultaneous"], sequence_mode="fpga")

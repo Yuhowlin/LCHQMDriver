@@ -46,12 +46,19 @@ def build_program(
     drive_cancel_amp: float | None = None,
     read_drive: bool = False,
     stark_frame_rad: float = 0.0,
+    phase_reset: str = "global",
+    cancel_tone: str = "victim",
 ):
     """Build the QUA program for Crosstalk Cancellation Tomography.
 
     bidirectional: add the drive-line cancel element exactly as the bidirectional SQRB program
     carries it (align, frame/IF reset, initial phase, and a frame step of -sub_p + wait per
     pulse, which is what it does while the probe idles). It never plays a pulse here.
+
+    phase_reset='if_only' drops reset_global_phase() (see crosstalk_compensated_sqrb).
+    cancel_tone='aggressor': the cancel elements output at their aggressor's frequency, so they
+    take the same -sub_p frame steps as the drive (they follow its frame) and the idle drive-line
+    element takes none.
     """
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
     reverse_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
@@ -64,6 +71,12 @@ def build_program(
         pulse_cycles = 4
 
     sub_p = float(sub_phase_rate_turns)
+    if phase_reset not in ("global", "if_only"):
+        raise ValueError(f"unknown phase_reset {phase_reset!r}")
+    aggressor_tone = cancel_tone == "aggressor"
+    # frame step of the cancel element per pulse, and of the idle drive-line element
+    cancel_step = -sub_p if aggressor_tone else 0.0
+    reverse_step = 0.0 if aggressor_tone else -sub_p
 
     sweep_axes = {
         "qubit": xr.DataArray([probe_qubit.name]),
@@ -108,7 +121,8 @@ def build_program(
                                 reset_frame(el)
                             for el in elems:
                                 reset_if_phase(el)
-                            reset_global_phase()
+                            if phase_reset == "global":
+                                reset_global_phase()
                             if reverse_elem is not None:
                                 frame_rotation_2pi(float(drive_init_phase / (2.0 * np.pi)), reverse_elem)
 
@@ -128,6 +142,8 @@ def build_program(
                                     for _ in range(r_int):
                                         wait(pulse_cycles, drive_qubit.xy.name)
                                         play(target_gate * amp(amp_fixed), cancel_elem)
+                                        if cancel_step != 0.0:
+                                            frame_rotation_2pi(cancel_step, cancel_elem)
                                 elif cond == "compensated":
                                     # virtual Z on the probe per aggressor pulse (x1/4 for a 90-type gate)
                                     stark_turns = float(stark_frame_rad) / (2.0 * np.pi) * (
@@ -138,18 +154,20 @@ def build_program(
                                         play(target_gate * amp(amp_fixed), cancel_elem)
                                         if sub_p != 0.0:
                                             frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
+                                        if cancel_step != 0.0:
+                                            frame_rotation_2pi(cancel_step, cancel_elem)
                                         if stark_turns != 0.0:
                                             frame_rotation_2pi(stark_turns, probe_qubit.xy.name)
                                         if reverse_elem is not None:
                                             if drive_cancel_amp is None:
-                                                if sub_p != 0.0:
-                                                    frame_rotation_2pi(-sub_p, reverse_elem)
+                                                if reverse_step != 0.0:
+                                                    frame_rotation_2pi(reverse_step, reverse_elem)
                                                 wait(pulse_cycles, reverse_elem)
                                             else:
                                                 # diagnostic: a concurrent play on the drive-line element
                                                 play(target_gate * amp(float(drive_cancel_amp)), reverse_elem)
-                                                if sub_p != 0.0:
-                                                    frame_rotation_2pi(-sub_p, reverse_elem)
+                                                if reverse_step != 0.0:
+                                                    frame_rotation_2pi(reverse_step, reverse_elem)
                             else:
                                 wait(4, probe_qubit.xy.name)
 
@@ -215,10 +233,18 @@ class CrosstalkCancellationTomography(_CoreTomography):
         return self._patch(config, probe_qubit, drive_qubit)
 
     def _patch(self, config: dict, probe_qubit, drive_qubit) -> dict:
-        config = _patch_cancel_element(config, probe_qubit, drive_qubit, self.params.target_gate)
+        tone = self.params.cancel_tone
+        if tone == "victim":
+            config = _patch_cancel_element(config, probe_qubit, drive_qubit, self.params.target_gate)
+        else:
+            config = _patch_mirror_cancel_element(
+                config, probe_qubit, drive_qubit, self.params.target_gate, tone=tone
+            )
         if self.params.bidirectional:
             # the drive-line element exactly as the bidirectional SQRB config builds it
-            config = _patch_mirror_cancel_element(config, drive_qubit, probe_qubit, self.params.target_gate)
+            config = _patch_mirror_cancel_element(
+                config, drive_qubit, probe_qubit, self.params.target_gate, tone=tone
+            )
         return config
 
     def preview_program(self):
@@ -274,6 +300,8 @@ class CrosstalkCancellationTomography(_CoreTomography):
             drive_cancel_amp=self.params.drive_cancel_amp,
             read_drive=bool(self.params.read_drive),
             stark_frame_rad=float(self.params.stark_frame_rad),
+            phase_reset=self.params.phase_reset,
+            cancel_tone=self.params.cancel_tone,
         )
         return prog
 
@@ -347,6 +375,8 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 drive_cancel_amp=self.params.drive_cancel_amp,
                 read_drive=bool(self.params.read_drive),
                 stark_frame_rad=float(self.params.stark_frame_rad),
+                phase_reset=self.params.phase_reset,
+                cancel_tone=self.params.cancel_tone,
             )
 
             return _acquire(
@@ -389,6 +419,8 @@ class CrosstalkCancellationTomography(_CoreTomography):
                 drive_cancel_amp=self.params.drive_cancel_amp,
                 read_drive=bool(self.params.read_drive),
                 stark_frame_rad=float(self.params.stark_frame_rad),
+                phase_reset=self.params.phase_reset,
+                cancel_tone=self.params.cancel_tone,
             )
             ds_b = _acquire(
                 machine,

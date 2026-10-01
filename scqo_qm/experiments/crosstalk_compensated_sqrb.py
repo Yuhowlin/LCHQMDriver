@@ -349,6 +349,167 @@ def play_compact_compensation_clifford(
                             frame_rotation_2pi(sub_phase_rate_turns, cancel_elem_name)
 
 
+def fpga_clifford_sequence(seed: int, seq_index: int, depth: int) -> list[int]:
+    """sequence_mode='fpga' sequence: `depth` random Cliffords from its own stream (seed, seq_index).
+
+    Every shorter depth d plays the first d gates (recovery from fpga_recovery_gates), so one
+    array serves all depths.
+    """
+    gates = np.random.default_rng([int(seed), int(seq_index)]).integers(0, 24, size=int(depth)).tolist()
+    return [int(g) for g in gates]
+
+
+def fpga_recovery_gates(gates: list[int], depths) -> list[int]:
+    """Recovery Clifford after the first d gates, for each d in depths."""
+    wanted = {int(d) for d in depths}
+    out: dict[int, int] = {}
+    curr = 0
+    if 0 in wanted:
+        out[0] = int(inv_gates[0])
+    for i, g in enumerate(gates, 1):
+        curr = int(c1_table[curr, g])
+        if i in wanted:
+            out[i] = int(inv_gates[curr])
+    return [out[int(d)] for d in depths]
+
+
+def _declare_fpga_sequences(depth_arr, seq_arr, *, num_sequences: int, seed: int | None, unroll: int) -> dict:
+    """QUA arrays for sequence_mode='fpga' (call inside the program).
+
+    Sequence s draws d_max gates from its own stream (seed, s) (probe) and (seed + 1000, s)
+    (drive); depth d plays the first d and the recovery gate of that prefix. These are not the
+    sequences the unrolled mode draws. Flat layout: gates[i * d_max + k], inv[i * n_d + j] for
+    the i-th sequence of this program.
+    """
+    d_max = int(np.max(depth_arr))
+    seed_p = seed if seed is not None else 42
+    seed_d = (seed + 1000) if seed is not None else 1042
+    out: dict[str, Any] = {"d_max": d_max, "n_d": len(depth_arr), "n_s": len(seq_arr), "unroll": max(1, int(unroll))}
+    for key, sd in (("p", seed_p), ("d", seed_d)):
+        gates, inv = [], []
+        for s_idx in seq_arr:
+            seq = fpga_clifford_sequence(sd, int(s_idx), d_max)
+            gates.extend(seq)
+            inv.extend(fpga_recovery_gates(seq, depth_arr))
+        out[f"gates_{key}"] = declare(int, value=gates)
+        out[f"inv_{key}"] = declare(int, value=inv)
+    out["depths"] = declare(int, value=[int(d) for d in depth_arr])
+    out["seq_ids"] = declare(int, value=[int(s) for s in seq_arr])
+    for name in ("s", "j", "k", "d", "base", "k_end", "g_inv_p", "g_inv_d"):
+        out[name] = declare(int)
+    return out
+
+
+def _play_composite(gate, element: str, scale: float | None = None):
+    """Play composite Clifford `gate` (QUA int expression or Python int) on element."""
+    if isinstance(gate, (int, np.integer)):
+        op = f"{COMPOSITE_PREFIX}{int(gate)}"
+        play(op if scale is None else op * amp(scale), element)
+        return
+    with switch_(gate, unsafe=True):
+        for g in range(len(CLIFFORD_3SUBSLOTS)):
+            with case_(g):
+                op = f"{COMPOSITE_PREFIX}{g}"
+                play(op if scale is None else op * amp(scale), element)
+
+
+def _play_fpga_clifford(gp, gd, *, cond, probe_qubit, drive_qubit, cancel_elem, reverse_cancel_elem, cancel_amp, drive_cancel_amp):
+    """One Clifford on every element the condition uses (gp/gd: probe/drive gate)."""
+    if cond != "isolated_drive":
+        _play_composite(gp, probe_qubit.xy.name)
+    if cond in ("simultaneous", "compensated", "isolated_drive"):
+        _play_composite(gd, drive_qubit.xy.name)
+    if cond == "compensated":
+        _play_composite(gd, cancel_elem, cancel_amp)
+        if reverse_cancel_elem is not None:
+            _play_composite(gp, reverse_cancel_elem, drive_cancel_amp)
+
+
+def _play_benchmark_fpga(
+    fpga: dict,
+    passes,
+    *,
+    probe_qubit,
+    drive_qubit,
+    read_qubits,
+    cancel_elem,
+    reverse_cancel_elem,
+    xy_elems,
+    cancel_amp,
+    drive_cancel_amp,
+    init_phase,
+    drive_init_phase,
+    phase_reset,
+    readout_scheme,
+    num_shots,
+    reset_type,
+    simulate,
+    use_state_discrimination,
+    I, Q, I_st, Q_st, n, m, m_st, state=None, state_st=None,
+):
+    """sequence_mode='fpga' body of one condition: QUA loops over sequence, depth and shot.
+
+    Stream order matches the unrolled mode (shots innermost, then depth, then sequence).
+    """
+    s, j, k, d = fpga["s"], fpga["j"], fpga["k"], fpga["d"]
+    base, k_end = fpga["base"], fpga["k_end"]
+    d_max, n_d, unroll = fpga["d_max"], fpga["n_d"], fpga["unroll"]
+    gates_p, gates_d, inv_p, inv_d = fpga["gates_p"], fpga["gates_d"], fpga["inv_p"], fpga["inv_d"]
+    kw = dict(
+        probe_qubit=probe_qubit,
+        drive_qubit=drive_qubit,
+        cancel_elem=cancel_elem,
+        reverse_cancel_elem=reverse_cancel_elem,
+        cancel_amp=cancel_amp,
+        drive_cancel_amp=drive_cancel_amp,
+    )
+    with for_(s, 0, s < fpga["n_s"], s + 1):
+        assign(m, fpga["seq_ids"][s])
+        save(m, m_st)
+        with for_(j, 0, j < n_d, j + 1):
+            assign(d, fpga["depths"][j])
+            assign(fpga["g_inv_p"], inv_p[s * n_d + j])
+            assign(fpga["g_inv_d"], inv_d[s * n_d + j])
+            with for_(n, 0, n < num_shots, n + 1):
+                for play_cond, read_idx in passes:
+                    probe_qubit.reset(reset_type, simulate)
+                    drive_qubit.reset(reset_type, simulate)
+                    align(*xy_elems)
+                    for el in xy_elems:
+                        reset_frame(el)
+                    for el in xy_elems:
+                        reset_if_phase(el)
+                    if phase_reset == "global":
+                        reset_global_phase()
+                    frame_rotation_2pi(init_phase / (2 * np.pi), cancel_elem)
+                    if reverse_cancel_elem is not None:
+                        frame_rotation_2pi(drive_init_phase / (2 * np.pi), reverse_cancel_elem)
+                    align(*xy_elems)
+
+                    # unrolled-by-`unroll` loop over the sequence, then the remainder, then recovery
+                    assign(base, s * d_max)
+                    assign(k_end, base + d - (unroll - 1))
+                    with for_(k, base, k < k_end, k + unroll):
+                        for u in range(unroll):
+                            _play_fpga_clifford(gates_p[k + u], gates_d[k + u], cond=play_cond, **kw)
+                    with for_(k, k, k < base + d, k + 1):
+                        _play_fpga_clifford(gates_p[k], gates_d[k], cond=play_cond, **kw)
+                    _play_fpga_clifford(fpga["g_inv_p"], fpga["g_inv_d"], cond=play_cond, **kw)
+
+                    align()
+                    for jj, i in enumerate(read_idx):
+                        if jj > 0 and readout_scheme == "sequential":
+                            align()
+                        if use_state_discrimination:
+                            read_qubits[i].readout_state(state[i])
+                            save(state[i], state_st[i])
+                        else:
+                            read_qubits[i].resonator.measure("readout", qua_vars=(I[i], Q[i]))
+                            save(I[i], I_st[i])
+                            save(Q[i], Q_st[i])
+                    align()
+
+
 def build_program(
     machine,
     probe_qubit,
@@ -385,13 +546,36 @@ def build_program(
     read_target: str | None = None,
     stark_frame_rad: float = 0.0,
     drive_stark_frame_rad: float = 0.0,
+    phase_reset: str = "global",
+    cancel_tone: str = "victim",
+    sequence_mode: str = "unrolled",
+    fpga_unroll: int = 4,
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
     bidirectional (benchmark only): a second cancel element on the drive qubit's line mirrors
     the probe's gates, both qubits are read out (streams I1/I2), and the isolated condition
     runs probe-alone then drive-alone within each shot so every qubit has its own isolated RB.
+
+    phase_reset: 'global' = reset_if_phase on every xy element + reset_global_phase();
+    'if_only' drops reset_global_phase(), which on chipQM is what makes an element's phase
+    depend on which resonators the program reads (the multiplexed-readout phase slip).
+
+    cancel_tone: 'aggressor' = the cancel elements output at the aggressor's frequency
+    (config from _patch_cancel_element(tone='aggressor')): benchmark plays them with no frame
+    steps; calibrate turns them with the drive's frame-freezing steps.
+
+    sequence_mode (benchmark): 'unrolled' plays every Clifford as its own QUA statements;
+    'fpga' stores the sequences in QUA arrays and plays one composite 3-subslot op per
+    Clifford and element (config from _patch_composite_cliffords) from an FPGA loop, so the
+    program size does not grow with depth. The loop is not strict-timed: each Clifford takes
+    48 ns + switch_ dispatch on every element alike, which only cancel_tone='aggressor' tolerates.
     """
+    if phase_reset not in ("global", "if_only"):
+        raise ValueError(f"unknown phase_reset {phase_reset!r}")
+    if sequence_mode not in ("unrolled", "fpga"):
+        raise ValueError(f"unknown sequence_mode {sequence_mode!r}")
+    aggressor_tone = cancel_tone == "aggressor"
     depth_arr = np.asarray(depths, dtype=int) if depths is not None else np.array([4])
     if sequence_indices is not None:
         seq_arr = np.asarray(sequence_indices, dtype=int)
@@ -432,6 +616,24 @@ def build_program(
         sub_p = 0.0
     # Reverse direction sees the opposite detuning (f_p - f_d)
     rev_sub_p = float(reverse_sub_phase_rate_turns) if reverse_sub_phase_rate_turns is not None else -sub_p
+    # Calibrate freezes the crosstalk axis by turning the drive's frame -sub_p per pulse; an
+    # aggressor-tone cancel element follows the drive's frame. In benchmark an aggressor-tone
+    # cancel element is already phase-locked to the crosstalk: no frame steps.
+    cal_cancel_step = -sub_p if aggressor_tone else 0.0
+    if aggressor_tone:
+        sub_p_cancel, rev_sub_p_cancel = 0.0, 0.0
+    else:
+        sub_p_cancel, rev_sub_p_cancel = sub_p, rev_sub_p
+    use_fpga = sequence_mode == "fpga" and mode == "benchmark"
+    if use_fpga:
+        if "compensated" in (conditions or ["compensated"]) and not aggressor_tone:
+            raise ValueError(
+                "sequence_mode='fpga' needs cancel_tone='aggressor' for the compensated condition: "
+                "the FPGA loop leaves dispatch gaps between Cliffords that per-subslot frame steps "
+                "of a victim-tone cancel element cannot follow"
+            )
+        if stark_frame_rad or drive_stark_frame_rad:
+            raise ValueError("sequence_mode='fpga' does not support stark_frame_rad")
 
     cond_name_map = {"isolated": 0, "simultaneous": 1, "compensated": 2}
     if conditions is not None:
@@ -469,7 +671,11 @@ def build_program(
         amp_fixed = declare(fixed)
         init_phase_fixed = declare(fixed)
 
-        if mode == "benchmark":
+        if use_fpga:
+            fpga = _declare_fpga_sequences(
+                depth_arr, seq_arr, num_sequences=num_sequences, seed=seed, unroll=fpga_unroll
+            )
+        elif mode == "benchmark":
             total_seqs = max(int(num_sequences), int(seq_arr.max()) + 1)
             seqs_p = {
                 int(d): generate_clifford_sequences(int(d), total_seqs, seed=seed if seed is not None else 42)
@@ -504,7 +710,8 @@ def build_program(
                                     reset_if_phase(probe_qubit.xy.name)
                                     reset_if_phase(drive_qubit.xy.name)
                                     reset_if_phase(cancel_elem)
-                                    reset_global_phase()
+                                    if phase_reset == "global":
+                                        reset_global_phase()
                                     frame_rotation_2pi(init_phase_fixed, cancel_elem)
 
                                     for _ in range(r_int):
@@ -512,6 +719,8 @@ def build_program(
                                         play(target_gate * amp(amp_fixed), cancel_elem)
                                         if sub_p != 0.0:
                                             frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
+                                        if cal_cancel_step != 0.0:
+                                            frame_rotation_2pi(cal_cancel_step, cancel_elem)
                             else:
                                 align(probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem)
                                 reset_frame(probe_qubit.xy.name)
@@ -520,7 +729,8 @@ def build_program(
                                 reset_if_phase(probe_qubit.xy.name)
                                 reset_if_phase(drive_qubit.xy.name)
                                 reset_if_phase(cancel_elem)
-                                reset_global_phase()
+                                if phase_reset == "global":
+                                    reset_global_phase()
                                 frame_rotation_2pi(init_phase_fixed, cancel_elem)
 
                                 for _ in range(r_int):
@@ -528,6 +738,8 @@ def build_program(
                                     play(target_gate * amp(amp_fixed), cancel_elem)
                                     if sub_p != 0.0:
                                         frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
+                                    if cal_cancel_step != 0.0:
+                                        frame_rotation_2pi(cal_cancel_step, cancel_elem)
 
                             align()
                             if use_state_discrimination:
@@ -563,6 +775,32 @@ def build_program(
                 else:
                     passes = [(cond, list(range(len(read_qubits))))]
 
+                if use_fpga:
+                    _play_benchmark_fpga(
+                        fpga,
+                        passes,
+                        probe_qubit=probe_qubit,
+                        drive_qubit=drive_qubit,
+                        read_qubits=read_qubits,
+                        cancel_elem=cancel_elem,
+                        reverse_cancel_elem=reverse_cancel_elem,
+                        xy_elems=xy_elems,
+                        cancel_amp=float(cancel_amp),
+                        drive_cancel_amp=float(drive_cancel_amp),
+                        init_phase=float(init_phase),
+                        drive_init_phase=float(drive_init_phase),
+                        phase_reset=phase_reset,
+                        readout_scheme=readout_scheme,
+                        num_shots=num_shots,
+                        reset_type=reset_type,
+                        simulate=simulate,
+                        use_state_discrimination=use_state_discrimination,
+                        I=I, Q=Q, I_st=I_st, Q_st=Q_st, n=n, m=m, m_st=m_st,
+                        state=state if use_state_discrimination else None,
+                        state_st=state_st if use_state_discrimination else None,
+                    )
+                    continue
+
                 for m_idx in seq_arr:
                     m_int = int(m_idx)
                     assign(m, m_int)
@@ -583,7 +821,8 @@ def build_program(
                                         reset_frame(el)
                                     for el in xy_elems:
                                         reset_if_phase(el)
-                                    reset_global_phase()
+                                    if phase_reset == "global":
+                                        reset_global_phase()
                                     frame_rotation_2pi(init_phase_fixed, cancel_elem)
                                     if reverse_cancel_elem is not None:
                                         frame_rotation_2pi(
@@ -599,11 +838,11 @@ def build_program(
                                             drive_qubit=drive_qubit,
                                             cancel_elem_name=cancel_elem,
                                             amp_val=float(cancel_amp),
-                                            sub_phase_rate_turns=sub_p,
+                                            sub_phase_rate_turns=sub_p_cancel,
                                             pulse_cycles=pulse_cycles,
                                             reverse_cancel_elem_name=reverse_cancel_elem,
                                             reverse_amp_val=float(drive_cancel_amp),
-                                            reverse_sub_phase_rate_turns=rev_sub_p,
+                                            reverse_sub_phase_rate_turns=rev_sub_p_cancel,
                                             stark_turns_probe=float(stark_frame_rad) / (2 * np.pi),
                                             stark_turns_drive=(
                                                 float(drive_stark_frame_rad) / (2 * np.pi) if bidirectional else 0.0
@@ -690,7 +929,11 @@ def _acquire_chunk_with_retry(machine, prog, sweep_axes, *, attempts: int = 3, p
 
 
 def _patch_cancel_element(
-    config: dict, victim_qubit: Any, aggressor_qubit: Any, target_gate: str = "x180"
+    config: dict,
+    victim_qubit: Any,
+    aggressor_qubit: Any,
+    target_gate: str = "x180",
+    tone: str = "victim",
 ) -> dict:
     """Add a cancellation element on the victim's line with an independent hardware core.
 
@@ -698,6 +941,11 @@ def _patch_cancel_element(
     Clifford operations all point at the AGGRESSOR's pulses, so the compensation mirrors the
     crosstalk waveform itself: every gate the aggressor plays is cancelled with its own
     shape and relative amplitude, and cancel_amp is one scale for all of them.
+
+    tone='victim' keeps the victim's IF (the crosstalk phase is then followed by frame steps of
+    sub_p per 16 ns subslot). tone='aggressor' moves the IF so the element outputs at the
+    aggressor's RF frequency on the victim's line: a scaled copy of the leaked field itself,
+    phase-locked to it in absolute time, so it needs no frame steps and tolerates timing gaps.
 
     On OPX1000 architectures, elements bound to the same core cannot execute pulses
     concurrently (they are serialized). Assigning cancel_elem an unused core on the
@@ -761,7 +1009,64 @@ def _patch_cancel_element(
         if "thread" in elem_dict:
             elem_dict["thread"] = new_core
 
+    if tone == "aggressor":
+        shift = float(aggressor_qubit.xy.RF_frequency) - float(victim_qubit.xy.RF_frequency)
+        new_if = float(elem_dict["intermediate_frequency"]) + shift
+        if abs(new_if) > 400e6:
+            raise ValueError(
+                f"cancel_tone='aggressor' needs IF {new_if / 1e6:.1f} MHz on {victim_qubit.xy.name}'s "
+                "line, outside the MW-FEM +-400 MHz band"
+            )
+        elem_dict["intermediate_frequency"] = new_if
+    elif tone != "victim":
+        raise ValueError(f"unknown cancel tone {tone!r}")
+
     config["elements"][cancel_elem_name] = elem_dict
+    return config
+
+
+COMPOSITE_PREFIX = "clif"
+
+
+def _op_iq(config: dict, element: str, op: str) -> np.ndarray:
+    """Complex I+jQ samples of `op` on `element` in a generated config."""
+    pulse = config["pulses"][config["elements"][element]["operations"][op]]
+    parts = []
+    for key in ("I", "Q"):
+        wf = config["waveforms"][pulse["waveforms"][key]]
+        if wf["type"] == "arbitrary":
+            parts.append(np.asarray(wf["samples"], dtype=float))
+        else:
+            parts.append(np.full(int(pulse["length"]), float(wf["sample"])))
+    return parts[0] + 1j * parts[1]
+
+
+def _patch_composite_cliffords(config: dict, element: str, source_element: str | None = None) -> dict:
+    """Add ops clif0..clif23 to `element`: each Clifford's 3 subslots as ONE waveform.
+
+    Subslot j holds source_element's pulse for CLIFFORD_3SUBSLOTS[g][j] (zeros when idle), so
+    a Clifford is a single 3-pulse-long play - what lets an FPGA loop pick it with one switch_.
+    A cancel element passes the aggressor's xy element as source (played * amp(cancel_amp)).
+    """
+    source_element = source_element or element
+    pulse_len = len(_op_iq(config, source_element, "x180"))
+    for g, subslots in enumerate(CLIFFORD_3SUBSLOTS):
+        parts = [
+            np.zeros(pulse_len, complex) if slot is None else _op_iq(config, source_element, slot[0])
+            for slot in subslots
+        ]
+        if any(len(p) != pulse_len for p in parts):
+            raise ValueError(f"{source_element}: Clifford subslot pulses differ in length")
+        z = np.concatenate(parts)
+        name = f"{element}.{COMPOSITE_PREFIX}{g}"
+        config["waveforms"][f"{name}.wf.I"] = {"type": "arbitrary", "samples": z.real.tolist()}
+        config["waveforms"][f"{name}.wf.Q"] = {"type": "arbitrary", "samples": z.imag.tolist()}
+        config["pulses"][f"{name}.pulse"] = {
+            "operation": "control",
+            "length": int(len(z)),
+            "waveforms": {"I": f"{name}.wf.I", "Q": f"{name}.wf.Q"},
+        }
+        config["elements"][element]["operations"][f"{COMPOSITE_PREFIX}{g}"] = f"{name}.pulse"
     return config
 
 
@@ -821,13 +1126,23 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             "readout_scheme": self.params.readout_scheme,
             "stark_frame_rad": float(self.params.stark_frame_rad),
             "drive_stark_frame_rad": float(self.params.drive_stark_frame_rad),
+            "phase_reset": self.params.phase_reset,
+            "cancel_tone": self.params.cancel_tone,
+            "sequence_mode": self.params.sequence_mode,
         }
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
         target_gate = getattr(self.params, "target_gate", "x180")
-        config = _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate)
+        tone = self.params.cancel_tone
+        config = _patch_cancel_element(config, probe_qubit, drive_qubit, target_gate, tone=tone)
         if self.params.uses_reverse_track():
-            config = _patch_cancel_element(config, drive_qubit, probe_qubit, target_gate)
+            config = _patch_cancel_element(config, drive_qubit, probe_qubit, target_gate, tone=tone)
+        if self.params.sequence_mode == "fpga" and self.params.mode == "benchmark":
+            config = _patch_composite_cliffords(config, probe_qubit.xy.name)
+            config = _patch_composite_cliffords(config, drive_qubit.xy.name)
+            config = _patch_composite_cliffords(config, f"{probe_qubit.xy.name}_cancel", drive_qubit.xy.name)
+            if self.params.uses_reverse_track():
+                config = _patch_composite_cliffords(config, f"{drive_qubit.xy.name}_cancel", probe_qubit.xy.name)
         return config
 
     def patch_preview_config(self, config: dict) -> dict:
@@ -978,6 +1293,10 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         all_depths = list(self.params.get_depths())
         batch_size = max(1, getattr(self.params, "benchmark_batch_size", 1))
         depth_batches = [all_depths[i : i + batch_size] for i in range(0, len(all_depths), batch_size)]
+        fpga = self.params.sequence_mode == "fpga"
+        if fpga:
+            # FPGA loop: program size does not grow with depth, every depth goes in one program
+            depth_batches = [all_depths]
 
         total_sequences = int(self.params.num_random_sequences)
         max_gates = int(getattr(self.params, "max_gates_per_batch", 120))
@@ -1000,6 +1319,11 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
 
                 if fixed_seq_batch_size is not None and int(fixed_seq_batch_size) > 0:
                     seq_chunk_size = int(fixed_seq_batch_size)
+                elif fpga:
+                    # bounded by the QUA array memory: two gate arrays of max depth per sequence
+                    seq_chunk_size = max(
+                        1, min(total_sequences, int(self.params.fpga_max_array_gates) // (2 * max_d))
+                    )
                 else:
                     seq_chunk_size = max(1, min(total_sequences, max_gates // gates_per_seq))
 
@@ -1136,6 +1460,8 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
                     use_state_discrimination=bool(self.params.use_state_discrimination),
                     simulate=getattr(self.backend, "simulate", False),
                     strict_timing=bool(getattr(self.params, "strict_timing", True)),
+                    phase_reset=self.params.phase_reset,
+                    cancel_tone=self.params.cancel_tone,
                 )
 
             ds_stage = _acquire(

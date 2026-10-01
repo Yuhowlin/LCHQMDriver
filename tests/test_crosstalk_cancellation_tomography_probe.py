@@ -94,3 +94,32 @@ def test_build_program_structure():
     assert sweep_axes["basis"].values.tolist() == ["z", "x", "y"]
 
 
+
+
+def test_aggressor_tone_cancel_follows_the_drive_frame_and_if_only_reset():
+    import re
+    from qm import generate_qua_script
+
+    mach, q1, q2 = _mock_machine()
+
+    def script(**kw):
+        prog, _ = build_program(
+            mach, q1, q2, target_gate="x180", cancel_amp=0.035, init_phase=0.0, sub_phase_rate_turns=0.12,
+            repetitions=[3], conditions=["noise_only", "cancel_only", "compensated"], bases=["z"],
+            num_shots=1, bidirectional=True, **kw,
+        )
+        return generate_qua_script(prog).replace("'", '"')
+
+    def steps(sc, elem):
+        return [float(v) for v in re.findall(rf'frame_rotation_2pi\(([-0-9.e]+), "{re.escape(elem)}"\)', sc)]
+
+    victim = script()
+    aggressor = script(cancel_tone="aggressor", phase_reset="if_only")
+    assert "reset_global_phase()" in victim and "reset_global_phase()" not in aggressor
+    # victim tone: the cancel element holds its phase, the idle drive-line element steps
+    assert all(v == 0.0 for v in steps(victim, "q1.xy_cancel"))
+    assert steps(victim, "q2.xy_cancel").count(-0.12) == 3
+    # aggressor tone: cancel steps with the drive (cancel_only + compensated), idle drive-line element does not
+    assert steps(aggressor, "q1.xy_cancel").count(-0.12) == 6
+    assert steps(aggressor, "q2.xy").count(-0.12) == 6
+    assert -0.12 not in steps(aggressor, "q2.xy_cancel")
