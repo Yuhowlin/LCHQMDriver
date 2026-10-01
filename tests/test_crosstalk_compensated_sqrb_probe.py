@@ -682,22 +682,26 @@ def test_fpga_sequences_are_prefixes_with_correct_recovery():
         assert state == 0
 
 
-def test_fpga_benchmark_program_size_does_not_grow_with_depth():
+def test_fpga_benchmark_program_size_does_not_grow_with_depth(monkeypatch):
+    import scqo_qm.experiments.crosstalk_compensated_sqrb as mod
+
+    monkeypatch.setattr(mod, "N_CLIFFORDS", 3)  # 9 merged cases instead of 576: fast script dump
     mach, q1, q2 = _mock_machine()
 
-    def script(depths):
+    def script(depths, **kw):
         prog, axes = build_program(
             mach, q1, q2, mode="benchmark", depths=depths, num_sequences=2, num_shots=3,
             conditions=["compensated"], cancel_amp=0.03, bidirectional=True, drive_cancel_amp=0.02,
-            readout_scheme="simultaneous", phase_reset="if_only", cancel_tone="aggressor",
-            sequence_mode="fpga",
+            readout_scheme="simultaneous", cancel_tone="aggressor", sequence_mode="fpga", **kw,
         )
         assert list(axes["depth"].values) == list(depths)
         return _script(prog)
 
     small, deep = script([1, 4]), script([1, 4, 1024, 2000])
     assert small.count("play(") == deep.count("play(")
-    assert '"clif23"' in deep and "with for_(" in deep
+    assert '"clif8"' not in deep and "with for_(" in deep
+    per_element = script([1, 4, 1024, 2000], fpga_dispatch="per_element")
+    assert '"clif23"' in per_element
     for stream in ("I1", "I2"):
         assert f'"{stream}"' in deep
 
@@ -710,3 +714,72 @@ def test_fpga_mode_refuses_victim_tone_compensation():
     # no compensation: the victim tone is never played, fine
     build_program(mach, q1, q2, mode="benchmark", depths=[4], num_sequences=1, num_shots=1,
                   conditions=["isolated", "simultaneous"], sequence_mode="fpga")
+
+
+def _fpga_script(**kw):
+    mach, q1, q2 = _mock_machine()
+    args = dict(depths=[1, 8], num_sequences=2, num_shots=2, cancel_amp=0.03, bidirectional=True,
+                drive_cancel_amp=0.02, readout_scheme="simultaneous", cancel_tone="aggressor",
+                sequence_mode="fpga", fpga_unroll=1)
+    args.update(kw)
+    prog, _ = build_program(mach, q1, q2, mode="benchmark", **args)
+    return _script(prog)
+
+
+def _declared_int_arrays(script):
+    import re
+
+    return [list(map(int, a.split(","))) for a in re.findall(r"declare\(int, value=\[([0-9, ]+)\]\)", script)]
+
+
+def test_fpga_merged_dispatch_uses_one_switch_over_both_gates(monkeypatch):
+    import scqo_qm.experiments.crosstalk_compensated_sqrb as mod
+
+    # 3 Cliffords instead of 24: same structure, 9 cases instead of 576 (fast script dump)
+    monkeypatch.setattr(mod, "N_CLIFFORDS", 3)
+    sc = _fpga_script(conditions=["compensated"])
+    # one switch per Clifford slot (loop, remainder, recovery), each with N*N cases
+    # (the script renders switch_ as an if_/elif_ chain)
+    assert sc.count("unsafe=True):") == 3
+    assert sc.count("==8))") == 3 and "==9))" not in sc
+    # every case plays all four elements
+    plays = [line.strip() for line in sc.splitlines() if line.strip().startswith("play(")]
+    for elem in ("q1.xy", "q2.xy", "q1.xy_cancel", "q2.xy_cancel"):
+        assert sum(line.endswith(f'"{elem}")') for line in plays) == 3 * 9
+
+
+def test_fpga_merged_index_is_probe_times_24_plus_drive():
+    from qm.qua import program
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import (
+        _declare_fpga_sequences, fpga_clifford_sequence, fpga_recovery_gates)
+
+    with program() as prog:
+        _declare_fpga_sequences(np.array([2, 5]), np.array([0, 3]), num_sequences=4, seed=None,
+                                unroll=1, arrays=("c",))
+    arrays = _declared_int_arrays(_script(prog))
+    gates, inv = [], []
+    for s in (0, 3):
+        gp, gd = fpga_clifford_sequence(42, s, 5), fpga_clifford_sequence(1042, s, 5)
+        gates += [a * 24 + b for a, b in zip(gp, gd)]
+        inv += [a * 24 + b for a, b in zip(fpga_recovery_gates(gp, [2, 5]), fpga_recovery_gates(gd, [2, 5]))]
+    assert gates in arrays and inv in arrays
+
+
+def test_fpga_builder_declares_only_the_arrays_its_passes_use(monkeypatch):
+    import scqo_qm.experiments.crosstalk_compensated_sqrb as mod
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import fpga_clifford_sequence
+
+    monkeypatch.setattr(mod, "N_CLIFFORDS", 3)
+    gp, gd = fpga_clifford_sequence(42, 0, 5), fpga_clifford_sequence(1042, 0, 5)
+    sim = _declared_int_arrays(_fpga_script(conditions=["simultaneous"], depths=[5], num_sequences=1))
+    assert [a * 3 + b for a, b in zip(gp, gd)] in sim
+    assert gp not in sim and gd not in sim
+    iso = _declared_int_arrays(_fpga_script(conditions=["isolated"], depths=[5], num_sequences=1))
+    assert gp in iso and gd in iso
+
+
+def test_fpga_per_element_dispatch_and_isolated_use_per_qubit_switches():
+    sc = _fpga_script(conditions=["compensated"], fpga_dispatch="per_element")
+    assert sc.count("unsafe=True):") == 3 * 4 and "==575))" not in sc
+    sc = _fpga_script(conditions=["isolated"])  # probe pass + drive pass, one element each
+    assert sc.count("unsafe=True):") == 3 * 2 and "==575))" not in sc

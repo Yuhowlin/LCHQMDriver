@@ -373,29 +373,48 @@ def fpga_recovery_gates(gates: list[int], depths) -> list[int]:
     return [out[int(d)] for d in depths]
 
 
-def _declare_fpga_sequences(depth_arr, seq_arr, *, num_sequences: int, seed: int | None, unroll: int) -> dict:
+N_CLIFFORDS = len(CLIFFORD_3SUBSLOTS)
+
+
+def _declare_fpga_sequences(
+    depth_arr,
+    seq_arr,
+    *,
+    num_sequences: int,
+    seed: int | None,
+    unroll: int,
+    arrays: tuple[str, ...] = ("p", "d"),
+) -> dict:
     """QUA arrays for sequence_mode='fpga' (call inside the program).
 
     Sequence s draws d_max gates from its own stream (seed, s) (probe) and (seed + 1000, s)
     (drive); depth d plays the first d and the recovery gate of that prefix. These are not the
     sequences the unrolled mode draws. Flat layout: gates[i * d_max + k], inv[i * n_d + j] for
-    the i-th sequence of this program.
+    the i-th sequence of this program. `arrays` picks which to declare: 'p' (probe), 'd'
+    (drive), 'c' (merged index gate_p * 24 + gate_d for a single switch_ over both qubits).
     """
     d_max = int(np.max(depth_arr))
     seed_p = seed if seed is not None else 42
     seed_d = (seed + 1000) if seed is not None else 1042
     out: dict[str, Any] = {"d_max": d_max, "n_d": len(depth_arr), "n_s": len(seq_arr), "unroll": max(1, int(unroll))}
+    lists: dict[str, tuple[list[int], list[int]]] = {}
     for key, sd in (("p", seed_p), ("d", seed_d)):
         gates, inv = [], []
         for s_idx in seq_arr:
             seq = fpga_clifford_sequence(sd, int(s_idx), d_max)
             gates.extend(seq)
             inv.extend(fpga_recovery_gates(seq, depth_arr))
-        out[f"gates_{key}"] = declare(int, value=gates)
-        out[f"inv_{key}"] = declare(int, value=inv)
+        lists[key] = (gates, inv)
+    lists["c"] = tuple(
+        [a * N_CLIFFORDS + b for a, b in zip(lists["p"][i], lists["d"][i])] for i in range(2)
+    )
+    for key in arrays:
+        out[f"gates_{key}"] = declare(int, value=lists[key][0])
+        out[f"inv_{key}"] = declare(int, value=lists[key][1])
+        out[f"g_inv_{key}"] = declare(int)
     out["depths"] = declare(int, value=[int(d) for d in depth_arr])
     out["seq_ids"] = declare(int, value=[int(s) for s in seq_arr])
-    for name in ("s", "j", "k", "d", "base", "k_end", "g_inv_p", "g_inv_d"):
+    for name in ("s", "j", "k", "d", "base", "k_end"):
         out[name] = declare(int)
     return out
 
@@ -411,6 +430,41 @@ def _play_composite(gate, element: str, scale: float | None = None):
             with case_(g):
                 op = f"{COMPOSITE_PREFIX}{g}"
                 play(op if scale is None else op * amp(scale), element)
+
+
+def _fpga_elements(cond, *, probe_qubit, drive_qubit, cancel_elem, reverse_cancel_elem, cancel_amp, drive_cancel_amp):
+    """(element, source qubit 'p'/'d', amp scale or None) for every element a condition plays."""
+    out = []
+    if cond != "isolated_drive":
+        out.append((probe_qubit.xy.name, "p", None))
+    if cond in ("simultaneous", "compensated", "isolated_drive"):
+        out.append((drive_qubit.xy.name, "d", None))
+    if cond == "compensated":
+        out.append((cancel_elem, "d", cancel_amp))
+        if reverse_cancel_elem is not None:
+            out.append((reverse_cancel_elem, "p", drive_cancel_amp))
+    return out
+
+
+def _fpga_uses_merged(cond: str, dispatch: str) -> bool:
+    """Merged dispatch only pays off when both qubits play (one switch_ instead of 2-4)."""
+    return dispatch == "merged" and cond in ("simultaneous", "compensated")
+
+
+def _play_fpga_merged(gc, elements):
+    """One switch_ over gate_p * 24 + gate_d; every case plays all elements of the condition.
+
+    Each element's thread walks every switch_ of the loop body, so per-element switches cost
+    one dispatch per element per Clifford (~52 ns of gap per Clifford with 4 elements in the
+    QM simulator); a single switch costs one.
+    """
+    with switch_(gc, unsafe=True):
+        for a in range(N_CLIFFORDS):
+            for b in range(N_CLIFFORDS):
+                with case_(a * N_CLIFFORDS + b):
+                    for element, src, scale in elements:
+                        op = f"{COMPOSITE_PREFIX}{a if src == 'p' else b}"
+                        play(op if scale is None else op * amp(scale), element)
 
 
 def _play_fpga_clifford(gp, gd, *, cond, probe_qubit, drive_qubit, cancel_elem, reverse_cancel_elem, cancel_amp, drive_cancel_amp):
@@ -446,6 +500,7 @@ def _play_benchmark_fpga(
     simulate,
     use_state_discrimination,
     I, Q, I_st, Q_st, n, m, m_st, state=None, state_st=None,
+    dispatch: str = "merged",
 ):
     """sequence_mode='fpga' body of one condition: QUA loops over sequence, depth and shot.
 
@@ -454,7 +509,7 @@ def _play_benchmark_fpga(
     s, j, k, d = fpga["s"], fpga["j"], fpga["k"], fpga["d"]
     base, k_end = fpga["base"], fpga["k_end"]
     d_max, n_d, unroll = fpga["d_max"], fpga["n_d"], fpga["unroll"]
-    gates_p, gates_d, inv_p, inv_d = fpga["gates_p"], fpga["gates_d"], fpga["inv_p"], fpga["inv_d"]
+    keys = [key for key in ("p", "d", "c") if f"gates_{key}" in fpga]
     kw = dict(
         probe_qubit=probe_qubit,
         drive_qubit=drive_qubit,
@@ -468,8 +523,8 @@ def _play_benchmark_fpga(
         save(m, m_st)
         with for_(j, 0, j < n_d, j + 1):
             assign(d, fpga["depths"][j])
-            assign(fpga["g_inv_p"], inv_p[s * n_d + j])
-            assign(fpga["g_inv_d"], inv_d[s * n_d + j])
+            for key in keys:
+                assign(fpga[f"g_inv_{key}"], fpga[f"inv_{key}"][s * n_d + j])
             with for_(n, 0, n < num_shots, n + 1):
                 for play_cond, read_idx in passes:
                     probe_qubit.reset(reset_type, simulate)
@@ -486,15 +541,31 @@ def _play_benchmark_fpga(
                         frame_rotation_2pi(drive_init_phase / (2 * np.pi), reverse_cancel_elem)
                     align(*xy_elems)
 
+                    if _fpga_uses_merged(play_cond, dispatch):
+                        elements = _fpga_elements(play_cond, **kw)
+                        gates_c = fpga["gates_c"]
+                        clifford = lambda i: _play_fpga_merged(gates_c[i], elements)  # noqa: E731
+                        recovery = lambda: _play_fpga_merged(fpga["g_inv_c"], elements)  # noqa: E731
+                    else:
+                        gates_p, gates_d = fpga.get("gates_p"), fpga.get("gates_d")
+                        clifford = lambda i: _play_fpga_clifford(  # noqa: E731
+                            gates_p[i] if gates_p is not None else None,
+                            gates_d[i] if gates_d is not None else None,
+                            cond=play_cond, **kw,
+                        )
+                        recovery = lambda: _play_fpga_clifford(  # noqa: E731
+                            fpga.get("g_inv_p"), fpga.get("g_inv_d"), cond=play_cond, **kw
+                        )
+
                     # unrolled-by-`unroll` loop over the sequence, then the remainder, then recovery
                     assign(base, s * d_max)
                     assign(k_end, base + d - (unroll - 1))
                     with for_(k, base, k < k_end, k + unroll):
                         for u in range(unroll):
-                            _play_fpga_clifford(gates_p[k + u], gates_d[k + u], cond=play_cond, **kw)
+                            clifford(k + u)
                     with for_(k, k, k < base + d, k + 1):
-                        _play_fpga_clifford(gates_p[k], gates_d[k], cond=play_cond, **kw)
-                    _play_fpga_clifford(fpga["g_inv_p"], fpga["g_inv_d"], cond=play_cond, **kw)
+                        clifford(k)
+                    recovery()
 
                     align()
                     for jj, i in enumerate(read_idx):
@@ -550,6 +621,7 @@ def build_program(
     cancel_tone: str = "victim",
     sequence_mode: str = "unrolled",
     fpga_unroll: int = 4,
+    fpga_dispatch: str = "merged",
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -575,6 +647,8 @@ def build_program(
         raise ValueError(f"unknown phase_reset {phase_reset!r}")
     if sequence_mode not in ("unrolled", "fpga"):
         raise ValueError(f"unknown sequence_mode {sequence_mode!r}")
+    if fpga_dispatch not in ("merged", "per_element"):
+        raise ValueError(f"unknown fpga_dispatch {fpga_dispatch!r}")
     aggressor_tone = cancel_tone == "aggressor"
     depth_arr = np.asarray(depths, dtype=int) if depths is not None else np.array([4])
     if sequence_indices is not None:
@@ -672,8 +746,27 @@ def build_program(
         init_phase_fixed = declare(fixed)
 
         if use_fpga:
+            # arrays the played conditions need: per-qubit for single-qubit passes (and
+            # per_element dispatch), merged for two-qubit passes under merged dispatch
+            played = set()
+            for c in benchmark_conditions:
+                played.add(c)
+                if c == "isolated" and read_drive and read_target in (None, "drive"):
+                    played.add("isolated_drive")
+            if read_drive and read_target == "drive":
+                played.discard("isolated")
+            arrays = set()
+            for c in played:
+                if _fpga_uses_merged(c, fpga_dispatch):
+                    arrays.add("c")
+                else:
+                    if c != "isolated_drive":
+                        arrays.add("p")
+                    if c != "isolated":
+                        arrays.add("d")
             fpga = _declare_fpga_sequences(
-                depth_arr, seq_arr, num_sequences=num_sequences, seed=seed, unroll=fpga_unroll
+                depth_arr, seq_arr, num_sequences=num_sequences, seed=seed, unroll=fpga_unroll,
+                arrays=tuple(k for k in ("p", "d", "c") if k in arrays),
             )
         elif mode == "benchmark":
             total_seqs = max(int(num_sequences), int(seq_arr.max()) + 1)
@@ -798,6 +891,7 @@ def build_program(
                         I=I, Q=Q, I_st=I_st, Q_st=Q_st, n=n, m=m, m_st=m_st,
                         state=state if use_state_discrimination else None,
                         state_st=state_st if use_state_discrimination else None,
+                        dispatch=fpga_dispatch,
                     )
                     continue
 
@@ -1129,6 +1223,8 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             "phase_reset": self.params.phase_reset,
             "cancel_tone": self.params.cancel_tone,
             "sequence_mode": self.params.sequence_mode,
+            "fpga_unroll": int(self.params.fpga_unroll),
+            "fpga_dispatch": self.params.fpga_dispatch,
         }
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
