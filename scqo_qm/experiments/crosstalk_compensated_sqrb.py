@@ -1181,6 +1181,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             mode=self.params.mode,
             target_gate=target_gate,
             depths=initial_depths,
+            conditions=self.params.conditions if self.params.mode == "benchmark" else None,
             num_sequences=int(self.params.num_random_sequences),
             num_shots=int(self.params.num_averages),
             cancel_amp=float(self.params.cancel_amp),
@@ -1241,7 +1242,11 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         sub_phase_rate_turns, rev_sub_phase_rate_turns = self._phase_rates_turns(probe_qubit, drive_qubit)
 
         target_gate = getattr(self.params, "target_gate", "x180")
-        preview_conds = ["compensated"] if self.params.mode == "benchmark" else None
+        if self.params.mode == "benchmark":
+            param_conds = self.params.conditions or ["compensated"]
+            preview_conds = ["compensated"] if "compensated" in param_conds else [param_conds[0]]
+        else:
+            preview_conds = None
         preview_depths = [4] if self.params.mode == "benchmark" else [20]
         preview_num_seq = 1 if self.params.mode == "benchmark" else int(self.params.num_random_sequences)
         preview_cal_reps = [20] if self.params.mode == "calibrate" else None
