@@ -773,10 +773,12 @@ def test_fpga_builder_declares_only_the_arrays_its_passes_use(monkeypatch):
     monkeypatch.setattr(mod, "N_CLIFFORDS", 3)
     gp, gd = fpga_clifford_sequence(42, 0, 5), fpga_clifford_sequence(1042, 0, 5)
     sim = _declared_int_arrays(
-        _fpga_script(conditions=["simultaneous"], depths=[5], num_sequences=1, fpga_dispatch="merged"))
+        _fpga_script(conditions=["simultaneous"], depths=[5], num_sequences=1, fpga_dispatch="merged",
+                     fpga_sequence_source="host"))
     assert [a * 3 + b for a, b in zip(gp, gd)] in sim
     assert gp not in sim and gd not in sim
-    iso = _declared_int_arrays(_fpga_script(conditions=["isolated"], depths=[5], num_sequences=1))
+    iso = _declared_int_arrays(
+        _fpga_script(conditions=["isolated"], depths=[5], num_sequences=1, fpga_sequence_source="host"))
     assert gp in iso and gd in iso
 
 
@@ -805,3 +807,50 @@ def test_fpga_parallel_dispatch_gives_every_element_its_own_loop():
     assert sorted(e for _, e in elem_loops) == ["q1.xy", "q1.xy_cancel", "q2.xy", "q2.xy_cancel"]
     assert len({v for v, _ in elem_loops}) == 4  # its own loop variable each
     assert sc.count("unsafe=True):") == 2 * 4  # loop + recovery switch per element
+
+
+def test_fpga_rng_draws_each_sequence_on_the_fpga():
+    sc = _fpga_script(conditions=["compensated"], depths=[1, 8], num_sequences=3)
+    # one sequence in memory at a time: gates + recovery-after per qubit, d_max long
+    assert sc.count("declare(int, size=8)") == 4
+    assert sc.count(".rand_int(24)") == 2  # probe and drive gate per generation step
+    # no host-generated gate arrays: only the Cayley table, the inverse table and the depths
+    arrays = _declared_int_arrays(sc)
+    assert sorted(len(a) for a in arrays) == [2, 24, 576]
+
+
+def test_fpga_rng_acquires_every_condition_and_sequence_in_one_program(monkeypatch):
+    import xarray as xr
+    from scqo.experiments.crosstalk_compensated_sqrb import CrosstalkCompensatedSQRBParameters
+    import scqo_qm.experiments.crosstalk_compensated_sqrb as mod
+
+    mach, q1, q2 = _mock_machine()
+
+    def run(**extra):
+        calls = []
+
+        def mock_acquire(m, p, s, **kw):
+            dims = [len(s[k].values) for k in ("qubit", "condition", "sequence_idx", "depth")]
+            calls.append((list(s["qubit"].values), dims))
+            return xr.Dataset(
+                data_vars={"I": (("qubit", "condition", "sequence_idx", "depth"), np.zeros(dims))},
+                coords={k: s[k].values for k in ("qubit", "condition", "sequence_idx", "depth")},
+            )
+
+        monkeypatch.setattr(mod, "_acquire", mock_acquire)
+        exp = QMCrosstalkCompensatedSQRB(
+            SimpleNamespace(machine=mach, device=None),
+            CrosstalkCompensatedSQRBParameters(
+                probe_qubit="q1", drive_qubit="q2", mode="benchmark", depths=[1, 64, 1024],
+                num_random_sequences=30, bidirectional=True, sequence_mode="fpga",
+                cancel_tone="aggressor", **extra),
+        )
+        res = exp._acquire_benchmark(mach, None, None, num_shots=1, probe_qubit=q1, drive_qubit=q2)
+        return calls, res
+
+    calls, res = run(readout_scheme="simultaneous")
+    assert calls == [(["q1", "q2"], [2, 3, 30, 3])]  # ONE program
+    assert dict(res.sizes) == {"qubit": 2, "condition": 3, "sequence_idx": 30, "depth": 3}
+    calls, res = run(readout_scheme="separate_passes")
+    assert calls == [(["q1"], [1, 3, 30, 3]), (["q2"], [1, 3, 30, 3])]  # one per read target
+    assert list(res.coords["qubit"].values) == ["q1", "q2"]

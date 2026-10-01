@@ -421,6 +421,61 @@ def _declare_fpga_sequences(
     return out
 
 
+def _declare_fpga_rng(depth_arr, seq_arr, *, seed: int | None, unroll: int, arrays: tuple[str, ...]) -> dict:
+    """QUA variables for sequence_mode='fpga' with sequences drawn ON the FPGA (call inside the program).
+
+    As qubit_sqrb: a QUA Random(seed) draws d_max gates per qubit for each sequence, the Cayley
+    table tracks the state, and after[i] holds the recovery gate after the first i+1 gates, so
+    depth d plays gates[:d] then after[d-1]. Only one sequence lives in memory at a time, so the
+    number of sequences per program is unlimited. sequence_idx s of the program is the s-th draw.
+    """
+    depths = [int(d) for d in depth_arr]
+    if min(depths) < 1:
+        raise ValueError("fpga_sequence_source='fpga_rng' needs depths >= 1")
+    seq_ids = [int(x) for x in seq_arr]
+    if seq_ids != list(range(seq_ids[0], seq_ids[0] + len(seq_ids))):
+        raise ValueError("fpga_sequence_source='fpga_rng' plays consecutive sequence indices")
+    d_max = max(depths)
+    out: dict[str, Any] = {
+        "rng": True, "d_max": d_max, "n_d": len(depths), "n_s": len(seq_ids), "first_seq": seq_ids[0],
+        "unroll": max(1, int(unroll)),
+    }
+    out["cayley"] = declare(int, value=c1_table.flatten().tolist())
+    out["inv_list"] = declare(int, value=inv_gates)
+    for key in ("p", "d"):
+        out[f"gates_{key}"] = declare(int, size=d_max)
+        out[f"after_{key}"] = declare(int, size=d_max)
+        out[f"cur_{key}"] = declare(int)
+        out[f"g_inv_{key}"] = declare(int)
+    if "c" in arrays:
+        out["gates_c"] = declare(int, size=d_max)
+        out["g_inv_c"] = declare(int)
+    out["step"] = declare(int)
+    out["i_gen"] = declare(int)
+    out["rand"] = Random(seed=seed if seed is not None else 42)
+    out["depths"] = declare(int, value=depths)
+    for name in ("s", "j", "k", "d", "base", "k_end"):
+        out[name] = declare(int)
+    out["k_el"] = [declare(int) for _ in range(4)]
+    return out
+
+
+def _generate_fpga_sequence(fpga: dict):
+    """Draw the next probe and drive sequences (d_max gates each) and their recovery gates."""
+    i_gen, step, cayley, inv_list = fpga["i_gen"], fpga["step"], fpga["cayley"], fpga["inv_list"]
+    for key in ("p", "d"):
+        assign(fpga[f"cur_{key}"], 0)
+    with for_(i_gen, 0, i_gen < fpga["d_max"], i_gen + 1):
+        for key in ("p", "d"):
+            cur = fpga[f"cur_{key}"]
+            assign(step, fpga["rand"].rand_int(N_CLIFFORDS))
+            assign(fpga[f"gates_{key}"][i_gen], step)
+            assign(cur, cayley[cur * N_CLIFFORDS + step])
+            assign(fpga[f"after_{key}"][i_gen], inv_list[cur])
+        if "gates_c" in fpga:
+            assign(fpga["gates_c"][i_gen], fpga["gates_p"][i_gen] * N_CLIFFORDS + fpga["gates_d"][i_gen])
+
+
 def _play_composite(gate, element: str, scale: float | None = None):
     """Play composite Clifford `gate` (QUA int expression or Python int) on element."""
     if isinstance(gate, (int, np.integer)):
@@ -521,15 +576,27 @@ def _play_benchmark_fpga(
         cancel_amp=cancel_amp,
         drive_cancel_amp=drive_cancel_amp,
     )
+    rng = bool(fpga.get("rng"))
     with for_(s, 0, s < fpga["n_s"], s + 1):
-        assign(m, fpga["seq_ids"][s])
-        save(m, m_st)
-        # first gate of this sequence in the flat arrays; set here, outside the timed block
-        assign(base, s * d_max)
+        if rng:
+            assign(m, s + fpga["first_seq"])
+            save(m, m_st)
+            _generate_fpga_sequence(fpga)
+            assign(base, 0)
+        else:
+            assign(m, fpga["seq_ids"][s])
+            save(m, m_st)
+            # first gate of this sequence in the flat arrays; set here, outside the timed block
+            assign(base, s * d_max)
         with for_(j, 0, j < n_d, j + 1):
             assign(d, fpga["depths"][j])
             for key in keys:
-                assign(fpga[f"g_inv_{key}"], fpga[f"inv_{key}"][s * n_d + j])
+                if not rng:
+                    assign(fpga[f"g_inv_{key}"], fpga[f"inv_{key}"][s * n_d + j])
+                elif key == "c":
+                    assign(fpga["g_inv_c"], fpga["after_p"][d - 1] * N_CLIFFORDS + fpga["after_d"][d - 1])
+                else:
+                    assign(fpga[f"g_inv_{key}"], fpga[f"after_{key}"][d - 1])
             with for_(n, 0, n < num_shots, n + 1):
                 for play_cond, read_idx in passes:
                     probe_qubit.reset(reset_type, simulate)
@@ -650,6 +717,7 @@ def build_program(
     sequence_mode: str = "unrolled",
     fpga_unroll: int = 1,
     fpga_dispatch: str = "parallel",
+    fpga_sequence_source: str = "fpga_rng",
 ):
     """Build the QUA program for Crosstalk Compensated Simultaneous SQRB.
 
@@ -675,6 +743,8 @@ def build_program(
         raise ValueError(f"unknown phase_reset {phase_reset!r}")
     if sequence_mode not in ("unrolled", "fpga"):
         raise ValueError(f"unknown sequence_mode {sequence_mode!r}")
+    if fpga_sequence_source not in ("fpga_rng", "host"):
+        raise ValueError(f"unknown fpga_sequence_source {fpga_sequence_source!r}")
     if fpga_dispatch not in ("parallel", "per_element", "merged"):
         raise ValueError(f"unknown fpga_dispatch {fpga_dispatch!r}")
     aggressor_tone = cancel_tone == "aggressor"
@@ -792,10 +862,16 @@ def build_program(
                         arrays.add("p")
                     if c != "isolated":
                         arrays.add("d")
-            fpga = _declare_fpga_sequences(
-                depth_arr, seq_arr, num_sequences=num_sequences, seed=seed, unroll=fpga_unroll,
-                arrays=tuple(k for k in ("p", "d", "c") if k in arrays),
-            )
+            if fpga_sequence_source == "fpga_rng":
+                fpga = _declare_fpga_rng(
+                    depth_arr, seq_arr, seed=seed, unroll=fpga_unroll,
+                    arrays=tuple(k for k in ("p", "d", "c") if k in arrays),
+                )
+            else:
+                fpga = _declare_fpga_sequences(
+                    depth_arr, seq_arr, num_sequences=num_sequences, seed=seed, unroll=fpga_unroll,
+                    arrays=tuple(k for k in ("p", "d", "c") if k in arrays),
+                )
         elif mode == "benchmark":
             total_seqs = max(int(num_sequences), int(seq_arr.max()) + 1)
             seqs_p = {
@@ -1253,6 +1329,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             "sequence_mode": self.params.sequence_mode,
             "fpga_unroll": int(self.params.fpga_unroll),
             "fpga_dispatch": self.params.fpga_dispatch,
+            "fpga_sequence_source": self.params.fpga_sequence_source,
         }
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
@@ -1436,6 +1513,51 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         max_gates = int(getattr(self.params, "max_gates_per_batch", 120))
         fixed_seq_batch_size = getattr(self.params, "benchmark_sequence_batch_size", None)
         target_gate = getattr(self.params, "target_gate", "x180")
+
+        read_targets = (
+            ["probe", "drive"]
+            if self.params.reads_both() and self.params.readout_scheme == "separate_passes"
+            else [None]
+        )
+        if fpga and self.params.fpga_sequence_source == "fpga_rng":
+            # Sequences are drawn on the FPGA one at a time: no array-memory limit, so every
+            # condition, sequence and depth goes into ONE program (one per read target).
+            per_target = []
+            for rt in read_targets:
+                cur_prog, cur_axes = build_program(
+                    machine,
+                    probe_qubit,
+                    drive_qubit,
+                    mode="benchmark",
+                    target_gate=target_gate,
+                    conditions=benchmark_conditions,
+                    depths=all_depths,
+                    num_sequences=total_sequences,
+                    num_shots=num_shots,
+                    cancel_amp=float(self.params.cancel_amp),
+                    init_phase=float(self.params.init_phase),
+                    sub_phase_rate_turns=sub_phase_rate_turns,
+                    reset_type=reset_type,
+                    use_state_discrimination=bool(self.params.use_state_discrimination),
+                    seed=self.params.seed,
+                    simulate=getattr(self.backend, "simulate", False),
+                    strict_timing=bool(getattr(self.params, "strict_timing", True)),
+                    **self._bidirectional_kwargs(
+                        -sub_phase_rate_turns if rev_sub_phase_rate_turns is None else rev_sub_phase_rate_turns
+                    ),
+                    read_target=rt,
+                )
+                per_target.append(
+                    _acquire_chunk_with_retry(
+                        machine, cur_prog, cur_axes, num_shots=num_shots, timeout=timeout, log=log, config=config
+                    )
+                )
+                print(
+                    f"# [Benchmark fpga_rng] {len(benchmark_conditions)} condition(s) x {total_sequences} "
+                    f"sequences x {len(all_depths)} depths in one program"
+                    + (f" (read {rt})" if rt else "") + " completed."
+                )
+            return per_target[0] if len(per_target) == 1 else xr.concat(per_target, dim="qubit")
 
         total_steps = len(benchmark_conditions) * len(depth_batches)
         current_step = 0
