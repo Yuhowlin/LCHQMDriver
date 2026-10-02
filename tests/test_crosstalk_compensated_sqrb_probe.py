@@ -113,15 +113,16 @@ def test_sequences_are_prefixes_with_correct_recovery():
 def test_programs_declare_the_sequences_of_their_chunk():
     prog, axes = _program(depths=[3, 5], sequence_indices=[4, 5], num_sequences=6)
     arrays = [list(map(int, a.split(","))) for a in re.findall(r"declare\(int, value=\[([0-9, ]+)\]\)", _script(prog))]
-    gp = clifford_sequence(42, 4, 5) + clifford_sequence(42, 5, 5)
-    gd = clifford_sequence(1042, 4, 5) + clifford_sequence(1042, 5, 5)
+    # one spare slot per sequence: the recovery of the depth being played goes there
+    gp = clifford_sequence(42, 4, 5) + [0] + clifford_sequence(42, 5, 5) + [0]
+    gd = clifford_sequence(1042, 4, 5) + [0] + clifford_sequence(1042, 5, 5) + [0]
     assert gp in arrays and gd in arrays
     assert list(axes["sequence_idx"].values) == [4, 5]
 
 
 def test_sequence_chunks_respect_program_length_and_array_memory():
     assert sequence_chunks(30, 1024, 7) == [list(range(i, min(i + 7, 30))) for i in range(0, 30, 7)]
-    by_memory = MAX_ARRAY_GATES // (2 * 4096)
+    by_memory = MAX_ARRAY_GATES // (2 * 4097)
     assert all(len(c) <= by_memory for c in sequence_chunks(10, 4096, 7))
     assert sum(sequence_chunks(10, 4096, 7), []) == list(range(10))
 
@@ -183,7 +184,7 @@ def test_every_element_has_its_own_loop():
                     break
     assert sorted(e for _, e in elem_loops) == ["q1.xy", "q1.xy_cancel", "q2.xy", "q2.xy_cancel"]
     assert len({v for v, _ in elem_loops}) == 4
-    assert sc.count("unsafe=True):") == 2 * 4  # loop + recovery switch per element
+    assert sc.count("unsafe=True):") == 4  # the recovery is the loop's last Clifford
     # the loop index is the bare loop variable (a computed index costs ~70 ns per Clifford)
     assert not re.search(r"\[\(v\d+\+\d+\)\]", sc)
 
@@ -203,6 +204,15 @@ def test_cancel_copies_play_scaled_with_their_phase_and_no_frame_steps():
     assert len(re.findall(r'frame_rotation_2pi\([^)]*"q[12]\.xy_cancel"\)', sc)) == 2
     assert "*amp(0.03)" in sc.replace(" ", "") and "*amp(0.02)" in sc.replace(" ", "")
     assert "reset_global_phase()" in sc
+
+
+def test_recovery_is_written_into_the_loop_and_restored():
+    sc = _script(_program(conditions=["compensated"])[0])
+    # slot d of each gate array takes the recovery before the shots and gets its gate back after
+    writes = re.findall(r"assign\((a\d+)\[(v\d+)\], (a\d+)\[", sc)
+    restores = re.findall(r"assign\((a\d+)\[(v\d+)\], (v\d+)\)", sc)
+    assert len(writes) == 2 and len(restores) == 2
+    assert {(a, i) for a, i, _ in writes} == {(a, i) for a, i, _ in restores}
 
 
 def test_debug_timestamps_bracket_each_element_loop():

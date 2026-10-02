@@ -16,9 +16,10 @@ How it runs (each choice was measured on chipQM hardware, 2026-10-01):
   a copy of the leaked field itself, so it needs no frame steps. cancel_tone='victim' outputs it
   at the victim's frequency and follows the leak's phase, which advances by
   s = (f_aggressor - f_victim) x 16 ns per subslot in the victim's frame, in steps: subslot j of
-  each composite is pre-rotated by j*s and the frame turns 3*s after every Clifford (what the
-  unrolled victim-tone program of 2026-10-01 did per subslot). Whether that frame step keeps the
-  loop gap-free is to be checked on hardware with debug_timestamps.
+  each composite is pre-rotated by j*s and the frame turns 3*s with every Clifford (what the
+  unrolled victim-tone program of 2026-10-01 did per subslot). The turn sits inside the switch_
+  case before the play: after the switch_ it cost ~86 ns per Clifford in the simulator, inside
+  none. Still to be confirmed on hardware with debug_timestamps.
 * Every shot resets frames and IF phases plus reset_global_phase() (without it the phase
   between lines wanders shot to shot). Reading a qubit shifts its xy phase by one 4 ns IF cycle
   relative to other FEM cores, so cancel parameters are calibrated by
@@ -158,24 +159,28 @@ def _declare_sequences(depth_arr, seq_arr, *, seed: int | None) -> dict:
     """QUA arrays and loop variables for one program (call inside the program).
 
     Probe sequences come from seed (default 42), drive sequences from seed + 1000 (default 1042).
-    Flat layout: gates[i * d_max + k] and inv[i * n_d + j] for the i-th sequence of the program.
+    Flat layout: gates[i * stride + k] (stride = d_max + 1) and inv[i * n_d + j] for the i-th
+    sequence of the program. The extra slot per sequence holds the recovery of the depth being
+    played, so the recovery is the loop's last Clifford: a separate switch_ after the loop played
+    one Clifford slot (48 ns) late in the simulator.
     """
     d_max = int(np.max(depth_arr))
+    stride = d_max + 1
     seed_p = seed if seed is not None else 42
     seed_d = (seed + 1000) if seed is not None else 1042
-    out: dict[str, Any] = {"d_max": d_max, "n_d": len(depth_arr), "n_s": len(seq_arr)}
+    out: dict[str, Any] = {"d_max": d_max, "stride": stride, "n_d": len(depth_arr), "n_s": len(seq_arr)}
     for key, sd in (("p", seed_p), ("d", seed_d)):
         gates, inv = [], []
         for s_idx in seq_arr:
             seq = clifford_sequence(sd, int(s_idx), d_max)
-            gates.extend(seq)
+            gates.extend(seq + [0])
             inv.extend(recovery_gates(seq, depth_arr))
         out[f"gates_{key}"] = declare(int, value=gates)
         out[f"inv_{key}"] = declare(int, value=inv)
-        out[f"g_inv_{key}"] = declare(int)
+        out[f"saved_{key}"] = declare(int)
     out["depths"] = declare(int, value=[int(d) for d in depth_arr])
     out["seq_ids"] = declare(int, value=[int(s) for s in seq_arr])
-    for name in ("s", "j", "d", "base", "k_stop"):
+    for name in ("s", "j", "d", "base", "k_rec", "k_stop"):
         out[name] = declare(int)
     out["k_el"] = [declare(int) for _ in range(4)]  # one loop variable per element
     return out
@@ -184,11 +189,17 @@ def _declare_sequences(depth_arr, seq_arr, *, seed: int | None) -> dict:
 # --------------------------------------------------------------------------- playback
 
 
-def _play_composite(gate, element: str, scale: float | None = None):
-    """Play composite Clifford `gate` (QUA int expression) on element, optionally scaled."""
+def _play_composite(gate, element: str, scale: float | None = None, pre_step: float = 0.0):
+    """Play composite Clifford `gate` (QUA int expression) on element, optionally scaled.
+
+    pre_step (turns) turns the frame just before the play, inside the case: a frame rotation
+    after the switch_ added ~86 ns per Clifford in the simulator, inside the case none.
+    """
     with switch_(gate, unsafe=True):
         for g in range(N_CLIFFORDS):
             with case_(g):
+                if pre_step:
+                    frame_rotation_2pi(pre_step, element)
                 op = f"{COMPOSITE_PREFIX}{g}"
                 play(op if scale is None else op * amp(scale), element)
 
@@ -290,7 +301,7 @@ def build_program(
         m = declare(int)
         m_st = declare_stream()
         seqs = _declare_sequences(depth_arr, seq_arr, seed=seed)
-        s, j, d, base, k_stop = seqs["s"], seqs["j"], seqs["d"], seqs["base"], seqs["k_stop"]
+        s, j, d, base, k_rec, k_stop = (seqs[k] for k in ("s", "j", "d", "base", "k_rec", "k_stop"))
 
         machine.initialize_qpu(target=probe_qubit)
         machine.initialize_qpu(target=drive_qubit)
@@ -301,13 +312,17 @@ def build_program(
             with for_(s, 0, s < seqs["n_s"], s + 1):
                 assign(m, seqs["seq_ids"][s])
                 save(m, m_st)
-                assign(base, s * seqs["d_max"])  # this sequence's first gate in the flat arrays
+                assign(base, s * seqs["stride"])  # this sequence's first gate in the flat arrays
                 with for_(j, 0, j < seqs["n_d"], j + 1):
                     assign(d, seqs["depths"][j])
-                    # loop bound once per depth: `kk < base + d` costs an extra cycle per Clifford
-                    assign(k_stop, base + d)
+                    # the recovery goes into slot d for this depth (restored after the shots), so
+                    # the loops play d + 1 Cliffords; the bound is computed once per depth:
+                    # `kk < base + d` costs an extra cycle per Clifford
+                    assign(k_rec, base + d)
+                    assign(k_stop, k_rec + 1)
                     for key in ("p", "d"):
-                        assign(seqs[f"g_inv_{key}"], seqs[f"inv_{key}"][s * seqs["n_d"] + j])
+                        assign(seqs[f"saved_{key}"], seqs[f"gates_{key}"][k_rec])
+                        assign(seqs[f"gates_{key}"][k_rec], seqs[f"inv_{key}"][s * seqs["n_d"] + j])
                     with for_(n, 0, n < num_shots, n + 1):
                         for play_cond, read_idx in passes:
                             probe_qubit.reset(reset_type, simulate)
@@ -318,9 +333,16 @@ def build_program(
                             for el in xy_elems:
                                 reset_if_phase(el)
                             reset_global_phase()
-                            frame_rotation_2pi(float(init_phase) / (2 * np.pi), cancel_elem)
+                            # victim tone: every Clifford turns the frame before it plays, so start
+                            # one step back - Clifford k then plays at init_phase + k * step
+                            frame_rotation_2pi(
+                                float(init_phase) / (2 * np.pi) - clifford_step.get(cancel_elem, 0.0), cancel_elem
+                            )
                             if reverse_cancel_elem is not None:
-                                frame_rotation_2pi(float(drive_init_phase) / (2 * np.pi), reverse_cancel_elem)
+                                frame_rotation_2pi(
+                                    float(drive_init_phase) / (2 * np.pi) - clifford_step.get(reverse_cancel_elem, 0.0),
+                                    reverse_cancel_elem,
+                                )
                             align(*xy_elems)
 
                             elements = _played_elements(play_cond, **elem_kw)
@@ -334,10 +356,7 @@ def build_program(
                                 gates = seqs[f"gates_{src}"]
                                 step = clifford_step.get(element, 0.0)
                                 with for_(kk, base, kk < k_stop, kk + 1):
-                                    _play_composite(gates[kk], element, scale)
-                                    if step:
-                                        frame_rotation_2pi(step, element)
-                                _play_composite(seqs[f"g_inv_{src}"], element, scale)
+                                    _play_composite(gates[kk], element, scale, step)
                                 if debug_timestamps:
                                     play("x180" * amp(0.0), element, timestamp_stream=f"ts1_{play_cond}_{element}")
 
@@ -351,6 +370,8 @@ def build_program(
                                     save(I[i], I_st[i])
                                     save(Q[i], Q_st[i])
                             align()
+                    for key in ("p", "d"):
+                        assign(seqs[f"gates_{key}"][k_rec], seqs[f"saved_{key}"])
 
         with stream_processing():
             m_st.save("n")
@@ -391,7 +412,7 @@ def _acquire_chunk_with_retry(machine, prog, sweep_axes, *, attempts: int = 3, p
 
 def sequence_chunks(num_sequences: int, max_depth: int, per_program: int) -> list[list[int]]:
     """Split the sequences into programs: at most per_program each, and within the array memory."""
-    by_memory = max(1, MAX_ARRAY_GATES // (2 * int(max_depth)))
+    by_memory = max(1, MAX_ARRAY_GATES // (2 * (int(max_depth) + 1)))
     size = max(1, min(int(num_sequences), int(per_program), by_memory))
     return [list(range(i, min(i + size, num_sequences))) for i in range(0, num_sequences, size)]
 
