@@ -19,7 +19,7 @@ How it runs (each choice was measured on chipQM hardware, 2026-10-01):
   each composite is pre-rotated by j*s and the frame turns 3*s with every Clifford (what the
   unrolled victim-tone program of 2026-10-01 did per subslot). The turn sits inside the switch_
   case before the play: after the switch_ it cost ~86 ns per Clifford in the simulator, inside
-  none. Still to be confirmed on hardware with debug_timestamps.
+  none. Hardware (2026-10-02): 48 ns per Clifford on every element for both tones.
 * Every shot resets frames and IF phases plus reset_global_phase() (without it the phase
   between lines wanders shot to shot). Reading a qubit shifts its xy phase by one 4 ns IF cycle
   relative to other FEM cores, so cancel parameters are calibrated by
@@ -189,6 +189,40 @@ def _declare_sequences(depth_arr, seq_arr, *, seed: int | None) -> dict:
 # --------------------------------------------------------------------------- playback
 
 
+def phase_reset(elements, *, ref_marker: str | None = None):
+    """Shot start shared by the benchmark and the tomography: align, frame and IF phase resets,
+    global phase reset.
+
+    A victim-tone cancel's phase against the leak depends on the time from this reset to the
+    first pulse (360 deg x (f_aggressor - f_victim) x that time), so both programs start from this
+    same code. ref_marker: an element on which a zero-amplitude marker with timestamp_stream
+    'ts_ref' plays just before (phase_ref_timestamps runs), to measure that time: with a 'ts_end'
+    marker right after the probe-line cancel's last pulse, and pulses back to back (hardware,
+    2026-10-02), first pulse - ts_ref = ts_end - ts_ref - (number of pulses x pulse length).
+    """
+    if ref_marker is not None:
+        play("x180" * amp(0.0), ref_marker, timestamp_stream="ts_ref")
+    align(*elements)
+    for el in elements:
+        reset_frame(el)
+    for el in elements:
+        reset_if_phase(el)
+    reset_global_phase()
+
+
+def victim_tone_phase_offset(t0_benchmark_ns: float, t0_tomography_ns: float, victim_qubit, aggressor_qubit) -> float:
+    """init_phase correction (rad) for a victim-tone cancel calibrated by the tomography.
+
+    t0 = first cancel pulse - ts_ref (phase_ref_timestamps runs of both programs, in ns; see
+    phase_reset for how it is read off the 'ts_ref' / 'ts_end' markers). The
+    leak's phase in the victim frame runs at f_aggressor - f_victim, so a later start in the
+    benchmark needs the cancel turned on by that much.
+    """
+    df = float(aggressor_qubit.xy.RF_frequency) - float(victim_qubit.xy.RF_frequency)
+    turns = (df * (float(t0_benchmark_ns) - float(t0_tomography_ns)) * 1e-9) % 1.0
+    return 2 * np.pi * (turns - 1.0 if turns > 0.5 else turns)
+
+
 def _play_composite(gate, element: str, scale: float | None = None, pre_step: float = 0.0):
     """Play composite Clifford `gate` (QUA int expression) on element, optionally scaled.
 
@@ -252,6 +286,7 @@ def build_program(
     seed: int | None = None,
     simulate: bool = False,
     debug_timestamps: bool = False,
+    phase_ref_timestamps: bool = False,
 ):
     """Build the crosstalk-compensated SQRB program (config: QMCrosstalkCompensatedSQRB._patch_config).
 
@@ -260,6 +295,10 @@ def build_program(
     debug_timestamps every element's loop is bracketed by zero-amplitude markers with
     timestamp_stream (ts0_/ts1_<pass>_<element>, 4 ns cycles). cancel_tone must match the
     config (patch_config); 'victim' adds the per-Clifford frame step on the cancel elements.
+    phase_ref_timestamps: a 'ts_ref' marker before the phase reset and a 'ts_end' marker after
+    the probe-line cancel's loop, nothing between the reset and the first pulse (for
+    victim_tone_phase_offset: first pulse = ts_end - (d + 1) x 12 cycles). A timestamp inside the
+    switch_ cases did not compile. Not with debug_timestamps.
     """
     if cancel_tone not in CANCEL_TONES:
         raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
@@ -327,12 +366,7 @@ def build_program(
                         for play_cond, read_idx in passes:
                             probe_qubit.reset(reset_type, simulate)
                             drive_qubit.reset(reset_type, simulate)
-                            align(*xy_elems)
-                            for el in xy_elems:
-                                reset_frame(el)
-                            for el in xy_elems:
-                                reset_if_phase(el)
-                            reset_global_phase()
+                            phase_reset(xy_elems, ref_marker=probe_qubit.xy.name if phase_ref_timestamps else None)
                             # victim tone: every Clifford turns the frame before it plays, so start
                             # one step back - Clifford k then plays at init_phase + k * step
                             frame_rotation_2pi(
@@ -357,6 +391,8 @@ def build_program(
                                 step = clifford_step.get(element, 0.0)
                                 with for_(kk, base, kk < k_stop, kk + 1):
                                     _play_composite(gates[kk], element, scale, step)
+                                if phase_ref_timestamps and element == cancel_elem:
+                                    play("x180" * amp(0.0), element, timestamp_stream="ts_end")
                                 if debug_timestamps:
                                     play("x180" * amp(0.0), element, timestamp_stream=f"ts1_{play_cond}_{element}")
 

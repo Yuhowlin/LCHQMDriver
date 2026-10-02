@@ -33,7 +33,7 @@ from scqo.experiments.crosstalk_cancellation_tomography import (
     compute_theoretical_phase_rate,
 )
 from scqo_qm.experiments._lib import acquire as _acquire, select_qubits
-from .crosstalk_compensated_sqrb import _patch_cancel_element
+from .crosstalk_compensated_sqrb import _patch_cancel_element, phase_reset
 
 
 def build_program(
@@ -55,6 +55,7 @@ def build_program(
     bidirectional: bool = False,
     read_drive: bool = False,
     cancel_tone: str = "aggressor",
+    phase_ref_timestamps: bool = False,
 ):
     """Build the QUA program for Crosstalk Cancellation Tomography.
 
@@ -63,6 +64,9 @@ def build_program(
     qubit is read in the same shot as the probe (its data is not returned).
     cancel_tone must match the config: an aggressor-tone copy turns with the drive's frame; a
     victim-tone copy is already still in the probe's frame and takes no steps.
+    The shot starts with crosstalk_compensated_sqrb.phase_reset, as the benchmark does;
+    phase_ref_timestamps adds its 'ts_ref' marker and a 'ts_end' marker on the cancel element right
+    after the last pulse (first pulse = ts_end - N x pulse length; the pulses are strict-timed).
     """
     if cancel_tone not in ("aggressor", "victim"):
         raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
@@ -111,13 +115,8 @@ def build_program(
                         probe_qubit.reset(reset_type, simulate)
                         drive_qubit.reset(reset_type, simulate)
 
+                        phase_reset(elems, ref_marker=probe_qubit.xy.name if phase_ref_timestamps else None)
                         with strict_timing_():
-                            align(*elems)
-                            for el in elems:
-                                reset_frame(el)
-                            for el in elems:
-                                reset_if_phase(el)
-                            reset_global_phase()
                             if cond in ("cancel_only", "compensated"):
                                 frame_rotation_2pi(init_phase_fixed, cancel_elem)
 
@@ -138,6 +137,8 @@ def build_program(
                                         frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
                                         if cancel_step:
                                             frame_rotation_2pi(cancel_step, cancel_elem)
+                                if phase_ref_timestamps:
+                                    play(target_gate * amp(0.0), cancel_elem, timestamp_stream="ts_end")
                             else:
                                 wait(4, probe_qubit.xy.name)
 
