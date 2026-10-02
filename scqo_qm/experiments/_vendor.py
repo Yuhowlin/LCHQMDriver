@@ -46,9 +46,12 @@ def vendor_pair(experiment: Any, composite: str) -> Any:
     Resolved by the backend (by name first, else by the composite's high/low
     membership): QM names its pairs after the coupler — ``coupler_q1_q2`` — so
     a roster composite named ``q1_q2`` is NOT a key of ``machine.qubit_pairs``
-    and must never be used as one.
+    and must never be used as one. Not through ``component()``: since SCQO
+    4.0.0 a composite carries facts only and has no view - its knobs live on
+    its declared operations, and a pair probe needs the pair whether or not the
+    roster declares any.
     """
-    return experiment.backend.device.component(composite).vendor
+    return experiment.backend.device.pair(composite)
 
 
 def vendor_pair_name(experiment: Any, composite: str) -> str:
@@ -95,6 +98,19 @@ def vendor_qubit(experiment: Any, mode: str, *, field: str,
             f"{field}={mode!r}: its {kind} channel {channel!r} serves no QUAM "
             f"qubit (a tunable coupler has none) - name a qubit mode")
     return qubit
+
+
+def vendor_borrowed(experiment: Any, address: str) -> Any:
+    """The QUAM element that REALIZES a borrowed drive channel, by its roster
+    ADDRESS (``xy2.q1_q2_c``) - resolved by the backend's device model, which
+    files adopted elements under that address and refuses (KeyError, naming
+    ``scqo-qm adopt-channel``) one the state has not adopted. The Session's gate
+    has normally refused that case already, before any run folder exists."""
+    view = experiment.backend.device.component(address)
+    element = getattr(view, "vendor", None)
+    if element is None:  # pragma: no cover - component() raises first
+        raise ValueError(f"{address!r}: its view serves no QUAM element")
+    return element
 
 
 def role_member(roster: Any, pair: str, role: str) -> str:

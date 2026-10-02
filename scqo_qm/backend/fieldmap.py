@@ -1,25 +1,24 @@
 """Declarative field catalog for the QM backend — PURE DATA, no vendor imports.
 
-Keyed by CHANNEL KIND (``drive`` / ``readout`` / ``flux``) since the greenfield
-model: knobs live on channel entities (``q1_xy``, ``q1_ro``, ``q1_z``), not on a
-single per-qubit component. Per kind, one :class:`scqo.fieldmap.VendorBinding`
-per realized KNOB (where it lives on the QUAM tree, in what unit, converted how —
-as a DESCRIPTION), one :class:`scqo.fieldmap.Unrealized` per knob this backend
-cannot realize, plus the :class:`scqo.fieldmap.VendorOnly` inventory of
-calibration-relevant knobs with no neutral counterpart yet. The EXECUTABLE
-conversions live in the three channel views of ``backend.py``
-(``QMDriveChannel`` / ``QMReadoutChannel`` / ``QMFluxChannel``, via
+Keyed by CHANNEL KIND (``drive`` / ``readout`` / ``flux``): knobs live on the
+entities a kind puts on the device - its channels (``xy1.q1``, ``feedline.q1``)
+and, for flux, the LINE it rides (``z1``: the standing bias and the output delay
+exist once per wire). Field names are unique per kind, so one map per kind
+covers both levels and the catalog says which level a field is. Per kind, one
+:class:`scqo.fieldmap.VendorBinding` per realized KNOB (where it lives on the
+QUAM tree, in what unit, converted how — as a DESCRIPTION), one
+:class:`scqo.fieldmap.Unrealized` per knob this backend cannot realize, plus the
+:class:`scqo.fieldmap.VendorOnly` inventory of calibration-relevant knobs with no
+neutral counterpart yet. The EXECUTABLE conversions live in the views of
+``backend.py`` (``QMDriveChannel`` / ``QMReadoutChannel`` / ``QMFluxLine``, via
 scqo_qm.quam_fields + power_tools) — this module documents them and is pinned
 to the implementation by ``tests/test_scqo_glue.py`` (per kind: bindings |
-unrealized == scqo's KNOB fields; imports stay vendor-free).
+unrealized == scqo's KNOB fields, channel and line; imports stay vendor-free).
 
-COMPOSITES are separate: a ``qubit_pair``'s knobs are PER-OPERATION full names
-(``iswap_coupler_flux``) instantiated from ``scqo.catalog.OP_KNOBS`` by the
-operations the ROSTER declares, so they cannot be tabulated by a static field
-name. :data:`OP_KNOB_BINDINGS` / :data:`OP_KNOB_UNREALIZED` are therefore keyed
-by the OP_KNOBS SUFFIX (``coupler_flux``, ``vz_high_rad``, ...) and served
-through ``QMQubitPair.read_knob``/``write_knob``; ``FIELD_BINDINGS`` stays
-channel-kind-only so the per-kind drift alarm keeps its exact meaning.
+OPERATIONS are separate: a declared ``<pair>.<op>`` carries
+``scqo.catalog.OPERATION_FIELDS`` by plain name (``coupler_flux``,
+``vz_high_rad``, ...), served through ``QMOperation.read_knob``/``write_knob``
+and described by :data:`OPERATION_BINDINGS` / :data:`OPERATION_UNREALIZED`.
 
 MONITORS are absent by construction: ``fidelity_g``/``fidelity_e``/``pos_*`` are
 measured performance OF the current knobs, never pushed, so they need no vendor
@@ -205,13 +204,12 @@ FIELD_BINDINGS: dict[str, dict[str, VendorBinding]] = {
         "idle_flux": VendorBinding(
             path="q.z.<flux_point>_offset  |  qp.coupler.<flux_point>_offset",
             unit="V",
-            convert="the offset SELECTED by the line's flux_point. QUBIT flux "
-                    "channel (q1_z): z.flux_point in joint/independent/min/"
-                    "arbitrary ('zero' reads 0 V and REFUSES writes). COUPLER "
-                    "flux channel (the coupler MODE's own q1_q2_c_z): "
-                    "coupler.flux_point off -> decouple_offset, on -> "
-                    "interaction_offset, arbitrary -> arbitrary_offset, 'zero' "
-                    "likewise 0 V and read-only",
+            convert="the offset SELECTED by the line's flux_point. A QUBIT's "
+                    "flux LINE (z1): z.flux_point in joint/independent/min/"
+                    "arbitrary ('zero' reads 0 V and REFUSES writes). A "
+                    "COUPLER's flux LINE (zc12): coupler.flux_point off -> "
+                    "decouple_offset, on -> interaction_offset, arbitrary -> "
+                    "arbitrary_offset, 'zero' likewise 0 V and read-only",
             note="which named flux point is active stays vendor config "
                  "(z.flux_point / coupler.flux_point, catalogued below), BUT "
                  "the scqo path PINS it: z.flux_point must be 'joint' and "
@@ -223,10 +221,11 @@ FIELD_BINDINGS: dict[str, dict[str, VendorBinding]] = {
                  "the pin, the write lands on hardware at the next "
                  "initialize_qpu (every probe runs it). A coupler's "
                  "standing/decouple bias IS this "
-                 "knob on its own flux channel - the old pair-level "
+                 "knob on its own flux line - the old pair-level "
                  "coupler_decouple_v / coupler_interaction_v are gone. On a "
                  "fixed-frequency machine the qubit has no z, so the roster "
-                 "declares no flux rider for it and the channel does not exist",
+                 "declares no flux rider for it and neither the line's bias "
+                 "nor the channel exists",
         ),
         "flux_delay_s": VendorBinding(
             path="q.z.opx_output.delay  |  coupler.opx_output.delay",
@@ -254,17 +253,14 @@ FIELD_BINDINGS: dict[str, dict[str, VendorBinding]] = {
 #: explicit empty map so the served-kind set stays visible in one place.
 UNREALIZED: dict[str, dict[str, Unrealized]] = {}
 
-# ------------------------------------------------------- composite (pair) knobs
+# ------------------------------------------------------------ operation knobs
 
-#: Per-OPERATION knob suffixes (``scqo.catalog.OP_KNOBS``) this backend realizes
-#: on a ``qubit_pair`` composite, keyed by SUFFIX: the full field name is
-#: ``<operation>_<suffix>`` for each operation the ROSTER declares on the pair
-#: (``iswap_coupler_flux``), which is why these cannot live in FIELD_BINDINGS
-#: (keyed by static catalog field name). The executable conversions are
-#: ``QMQubitPair.read_knob``/``write_knob``; ``<op>`` below is the QUAM macro
+#: ``scqo.catalog.OPERATION_FIELDS`` this backend realizes on a declared
+#: operation ``<pair>.<op>`` (``q1_q2.iswap``). The executable conversions are
+#: ``QMOperation.read_knob``/``write_knob``; ``<op>`` below is the QUAM macro
 #: whose name matches the declared operation (case-insensitively: QUAM spells
 #: the gate macro "CZ", the roster spells the operation "cz").
-OP_KNOB_BINDINGS: dict[str, VendorBinding] = {
+OPERATION_BINDINGS: dict[str, VendorBinding] = {
     "coupler_flux": VendorBinding(
         path="qp.macros['<op>'].coupler_flux_pulse.amplitude "
              "| qp.coupler.operations[qp.macros['<op>'].flux_pulse].amplitude",
@@ -272,8 +268,8 @@ OP_KNOB_BINDINGS: dict[str, VendorBinding] = {
         note="the flux-activated gate operating point ON THE COUPLER LINE - the "
              "amplitude of the pulse the gate macro plays on qp.coupler while "
              "the moving qubit's z pulse runs. Distinct from the coupler's "
-             "STANDING bias, which is idle_flux on the coupler mode's own flux "
-             "channel. THREE macro shapes carry it and the resolution walks them "
+             "STANDING bias, which is idle_flux on the coupler's own flux "
+             "line. THREE macro shapes carry it and the resolution walks them "
              "in order (scqo_qm.experiments._coupler_knob.find_coupler_pulse): "
              "the vendor quam_builder CZGate's coupler_flux_pulse holding a Pulse; "
              "the same field holding a pulse NAME; and the lab's "
@@ -301,42 +297,42 @@ OP_KNOB_BINDINGS: dict[str, VendorBinding] = {
     ),
 }
 
-#: Per-operation knob suffixes with no QM realization yet (same shape as
-#: UNREALIZED; the dataclass attribute spelled ``category`` carries the
-#: COMPOSITE KIND). Reads and writes both raise with these reasons.
-OP_KNOB_UNREALIZED: dict[str, Unrealized] = {
+#: Operation fields with no QM realization yet (same shape as UNREALIZED; the
+#: dataclass attribute spelled ``category`` says "operation"). Reads and writes
+#: both raise with these reasons.
+OPERATION_UNREALIZED: dict[str, Unrealized] = {
     "duration_s": Unrealized(
-        "qubit_pair", "duration_s",
+        "operation", "duration_s",
         "the gate length is carried by TWO simultaneous pulses (the moving "
         "qubit's z pulse and the coupler pulse); writing one without the other "
         "would desync them, and no scqo experiment calibrates a pair duration "
         "yet (Phase 2b chevron/CZ). Promote to a coupled binding when one lands"),
     "drive_freq_hz": Unrealized(
-        "qubit_pair", "drive_freq_hz",
+        "operation", "drive_freq_hz",
         "microwave-activated two-qubit gates are not wired here: the QM macros "
         "in use (CZGate) are FLUX-activated, so there is no gate drive tone to "
         "bind"),
     "amp": Unrealized(
-        "qubit_pair", "amp",
+        "operation", "amp",
         "no overall gate-drive amplitude on a flux-activated macro - the "
-        "flux-plane counterpart is <op>_coupler_flux (bound above)"),
+        "flux-plane counterpart is coupler_flux (bound above)"),
     "amp_ratio": Unrealized(
-        "qubit_pair", "amp_ratio",
+        "operation", "amp_ratio",
         "two-emission-channel knob: no QM macro here drives a gate from two "
         "channels whose ratio is calibrated"),
     "rel_phase_rad": Unrealized(
-        "qubit_pair", "rel_phase_rad",
+        "operation", "rel_phase_rad",
         "two-emission-channel knob: see amp_ratio - nothing to bind on a "
         "flux-activated macro"),
     "waveform": Unrealized(
-        "qubit_pair", "waveform",
+        "operation", "waveform",
         "optimized-pulse samples: QM stores the gate pulse as a typed Pulse "
         "object (SquarePulse/FlatTopGaussian), not a sample array; binding an "
         "arbitrary waveform means switching the macro's pulse class, which no "
         "scqo experiment asks for yet"),
     "waveform_dt_s": Unrealized(
-        "qubit_pair", "waveform_dt_s",
-        "the mandatory companion of <op>_waveform - Unrealized with it"),
+        "operation", "waveform_dt_s",
+        "the mandatory companion of waveform - Unrealized with it"),
 }
 
 #: Backend-unique calibration knobs, vendor-owned and untracked by SCQO (edit in
@@ -408,8 +404,8 @@ VENDOR_ONLY_COMMON: dict[str, VendorOnly] = {
         path="q.z.flux_point", unit="", kind="vendor",
         doc="which named qubit flux point idles (joint/independent/min/"
             "arbitrary/zero) - SELECTS which offset the tracked idle_flux "
-            "reads and writes on q1_z. A mode switch, not a calibration "
-            "outcome",
+            "reads and writes on the qubit's flux line (z1). A mode switch, "
+            "not a calibration outcome",
         edit="PINNED: the backend factory REFUSES any value but 'joint' (the "
              "point every probe's initialize_qpu applies) - a declaration that "
              "disagrees with the applied bias makes idle_flux inert. Flipping "
@@ -419,7 +415,7 @@ VENDOR_ONLY_COMMON: dict[str, VendorOnly] = {
         path="qp.coupler.flux_point", unit="", kind="vendor",
         doc="which named coupler point idles (off/on/arbitrary/zero) - SELECTS "
             "which offset the tracked idle_flux reads and writes on the "
-            "COUPLER mode's flux channel (q1_q2_c_z). A mode switch, not a "
+            "COUPLER's flux line (zc12). A mode switch, not a "
             "calibration outcome",
         edit="PINNED to 'off' by the same factory audit; flipping it re-points "
              "the coupler's idle_flux at a different stored number"),
@@ -427,18 +423,19 @@ VENDOR_ONLY_COMMON: dict[str, VendorOnly] = {
         path="qp.coupler.decouple_offset", unit="V", kind="realizer",
         doc="the interaction-OFF coupler standing bias (pair_zz_coupler's "
             "product - the ZZ zero crossing). It REALIZES the tracked "
-            "idle_flux of the coupler mode's flux channel while "
+            "idle_flux of the coupler's flux line while "
             "coupler.flux_point == 'off' (the old pair-level coupler_decouple_v "
             "neutral field is GONE)",
-        edit="scqo set <coupler>_z.idle_flux=..."),
+        edit="scqo set <coupler line>.idle_flux=... (e.g. zc12.idle_flux; "
+             "the coupler shorthand q1_q2_c.idle_flux resolves to it)"),
     "coupler_interaction_offset": VendorOnly(
         path="qp.coupler.interaction_offset", unit="V", kind="realizer",
         doc="the interaction-ON coupler standing bias (gate operating point). "
-            "It REALIZES the tracked idle_flux of the coupler mode's flux "
-            "channel while coupler.flux_point == 'on' - which the factory pins "
+            "It REALIZES the tracked idle_flux of the coupler's flux line "
+            "while coupler.flux_point == 'on' - which the factory pins "
             "OFF, so there is no reachable governed write and `edit` is "
             "deliberately empty. A per-GATE operating point is NOT this: that "
-            "is the composite knob <operation>_coupler_flux (bound above)"),
+            "is the operation knob <pair>.<op>.coupler_flux (bound above)"),
     "coupler_arbitrary_offset": VendorOnly(
         path="qp.coupler.arbitrary_offset", unit="V", kind="realizer",
         doc="free-form coupler bias for exploratory work - realizes idle_flux "
@@ -453,15 +450,15 @@ VENDOR_ONLY_COMMON: dict[str, VendorOnly] = {
     "pair_detuning": VendorOnly(
         path="qp.detuning", unit="V", kind="candidate",
         doc="flux amplitude bringing the two qubits to equal energy (the gate "
-            "resonance condition) - neutral candidate for a per-operation "
-            "composite knob; promoted when a scqo experiment (chevron) "
+            "resonance condition) - neutral candidate for an operation "
+            "knob; promoted when a scqo experiment (chevron) "
             "calibrates it"),
     "pair_moving_qubit": VendorOnly(
         path="qp.moving_qubit", unit="", kind="vendor",
         doc="which vendor side (control/target) carries the flux pulse in 2Q "
             "gates - a PER-OPERATION fact the driver reads; roster roles are "
             "high/low and never store this (settled pair-role decision). The "
-            "composite view maps high/low onto control/target by NAME"),
+            "operation view maps high/low onto control/target by NAME"),
     "pair_mutual_flux_bias": VendorOnly(
         path="qp.mutual_flux_bias", unit="V", kind="vendor",
         doc="two-element per-qubit z biases for the pair's mutual idle "
@@ -499,7 +496,10 @@ VENDOR_ONLY_MW_FEM: dict[str, VendorOnly] = {
     "drive_upconverter_frequency": VendorOnly(
         path="q.xy.opx_output.upconverter_frequency", unit="Hz", kind="vendor",
         doc="drive LO - PORT-level MW-FEM upconverter, shared by everything on "
-            "that output",
+            "that output. A port carrying an adopted borrowed channel spells it "
+            "upconverters.1.frequency instead (upconverters.2 is the adopted "
+            "channel's LO) and leaves upconverter_frequency null - qm-qua refuses both "
+            "(scqo_qm/_mw_fem.py reads either)",
         coupled=("drive_band",),
         edit="keep IF = f_01 - LO in range and drive_band matching"),
     "downconverter_frequency": VendorOnly(
@@ -526,8 +526,8 @@ VENDOR_ONLY_MW_FEM: dict[str, VendorOnly] = {
         coupled=("readout_upconverter_frequency",),
         edit="state.json ports.mw_outputs.<con>.<fem>.<port>.band, offline with "
              "QUAM tools. The MW-FEM pairs ports (2,3) (4,5) (6,7) and BOTH "
-             "ports of a pair must carry the same band (see experiments/"
-             "broadband_qubit_spectroscopy.py::_partner_port_id); "
+             "ports of a pair must carry the same band (see "
+             "scqo_qm/_mw_fem.py::partner_port_id); "
              "quam_config/populate_quam_lf_mw_fems.py::get_band(freq) is the "
              "derivation the lab seeds from"),
     "drive_band": VendorOnly(
@@ -717,19 +717,39 @@ def vendor_only_for(rf_chains) -> dict[str, VendorOnly]:
     return out
 
 
-#: The vendor OPERATOR CLIs this driver ships. They are not scqo subcommands
-#: (scqo run <name> is the single entry point, and a QM-specific verb could only
-#: be refused on Qblox), so `scqo -h` cannot list them - `scqo state --fields`
-#: renders this inventory instead, which is the only place an operator discovers
-#: them rather than memorizing them. Declared HERE and not in qm_backend.py
+#: The vendor OPERATOR CLIs this driver ships, as `scqo-qm <name>` subcommands
+#: (`_` -> `-`). This tuple IS the dispatch table: scqo_qm/cli.py runs
+#: scqo_qm.backend.<name>.main, so an entry's name is also its module's. They are
+#: not scqo subcommands (scqo run <name> is the single entry point, and a
+#: QM-specific verb could only be refused on Qblox), so `scqo -h` cannot list
+#: them - `scqo-qm -h` and `scqo state --fields` render this inventory instead,
+#: which is where an operator discovers them rather than memorizing them.
+#: Declared HERE and not in qm_backend.py
 #: because it is pure declarative vendor metadata of the same class as
 #: VENDOR_ONLY, and this module's import guard is what proves it stays
 #: vendor-free. Every string below compresses the target module's own docstring.
 OPERATOR_COMMANDS: tuple[OperatorCommand, ...] = (
     OperatorCommand(
+        name="adopt_channel",
+        command="scqo-qm adopt-channel <line>.<target> --lo-hz <Hz>",
+        doc="MW-FEM trees only. ADOPT a borrowed drive channel (e.g. xy2.q1_q2_c, a "
+            "coupler driven through q2's xy wire): add an element for it on the line's "
+            "port, on that port's second upconverter at --lo-hz, tuned to the target's "
+            "measured f_01_hz, with x180/x90 cosine pulses (DRAG off; --length-ns 200, "
+            "--pi-amp 0.25 and half). The port moves to the two-upconverter form and, "
+            "when its band cannot hold both LOs, to a band that can, together with its "
+            "port-pair partner. Until then scqo refuses the channel by name. The live "
+            "state.json is replaced only after a staged save proves nothing else "
+            "changes. Fully offline.",
+        options="--freq-hz HZ (default: the target's f_01_hz)  --length-ns NS  "
+                "--pi-amp A  --list (show the drive ports and adopted channels, write "
+                "nothing)  --dry-run  --config PATH",
+        caution="Changes the port pair's band and LO form for EVERY element on it - "
+                "re-check those qubits (qubit_power_rabi) afterwards. Writes the "
+                "setup's live state.json, so run it between measurements."),
+    OperatorCommand(
         name="apply_distortion",
-        command="python -m scqo_qm.backend.apply_distortion --target <target> "
-                "[--run <run_id>]",
+        command="scqo-qm apply-distortion --target <target> [--run <run_id>]",
         doc="LF-FEM flux lines only. Write accepted cryoscope taps "
             "(distortion_amp / distortion_tau_s "
             "are FACTS - accepting them records the measurement and pushes "
@@ -744,7 +764,7 @@ OPERATOR_COMMANDS: tuple[OperatorCommand, ...] = (
                 "characterization)  --dry-run  --config PATH"),
     OperatorCommand(
         name="calibrate_octave",
-        command="python -m scqo_qm.backend.calibrate_octave [--target <qubit>...]",
+        command="scqo-qm calibrate-octave [--target <qubit>...]",
         doc="Octave trees only. Calibrate the Octave up-conversion mixers (LO "
             "leakage and image) for the active device/setup. An Octave mixes a "
             "baseband IQ pair up with an analog mixer, so every output carries "
@@ -766,17 +786,46 @@ OPERATOR_COMMANDS: tuple[OperatorCommand, ...] = (
                 "directory you launched from."),
     OperatorCommand(
         name="close_qm",
-        command="python -m scqo_qm.backend.close_qm",
+        command="scqo-qm close-qm [--qm-id <id>]",
         doc="Halt running jobs and close the open Quantum Machines on the "
             "cluster serving the ACTIVE scqo device/setup - the recovery door "
             "when a crashed or abandoned session still holds the cluster's "
             "locks (symptom: a job that stalls forever, or an open that never "
             "returns). NOT a wedged-gateway fix: a cluster in "
             "DEADLINE_EXCEEDED needs a restart from its web UI.",
-        options="--qm-id ID (just this one)  --dry-run (list what is open, "
-                "close nothing)  --config PATH",
+        options="--qm-id ID (just this one)  --config PATH",
         caution="DESTRUCTIVE and there is NO confirmation prompt - halting a "
                 "job discards data it had not yet streamed out, including a "
-                "measurement someone else started. Run --dry-run first unless "
-                "you know the cluster is idle."),
+                "measurement someone else started. Run scqo-qm cluster first "
+                "to see what is open and running."),
+    OperatorCommand(
+        name="cluster",
+        command="scqo-qm cluster",
+        doc="Read-only. List the Quantum Machines open on the cluster serving "
+            "the active device/setup and, under each, the jobs that have not "
+            "finished (running, processing, queued) with their start times. "
+            "Cluster-wide: every user's QMs are shown, since they share the "
+            "cluster's locks, and an open QM with no job still holds its ports. "
+            "The look-first step before close-qm. On QOP 2.x only each QM's "
+            "running job is visible, not the queue.",
+        options="--config PATH"),
+    OperatorCommand(
+        name="register_partial_swap",
+        command="scqo-qm register-partial-swap --pair <pair> --name partial_swap_<t> "
+                "--z-amp <V> --coupler-amp <V>",
+        doc="Add or retune a square partial-swap operation on one qubit pair: "
+            "the control qubit's z pulse (the swap resonance) and the coupler "
+            "pulse (the angle), both named partial_swap_square_<t>, plus the "
+            "ISwapImplementation macro partial_swap_<t> that experiments play "
+            "by name (<t> = target angle x 100, three digits). Step 2 of "
+            "SCQO/procedures/pair-partial-swap. The live state.json is "
+            "replaced only after a staged save proves nothing else changes. "
+            "Fully offline.",
+        options="--update (retune an existing operation's amplitudes)  "
+                "--length NS (new operation only, default 40)  --list (show "
+                "the pairs' partial swaps, write nothing)  --dry-run  "
+                "--config PATH",
+        caution="Writes the setup's live state.json: a run in progress "
+                "records the edit as setup-snapshot drift, so run it between "
+                "measurements."),
 )

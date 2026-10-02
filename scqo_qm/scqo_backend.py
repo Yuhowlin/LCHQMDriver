@@ -8,8 +8,9 @@ canonical names — ``state.json`` + ``wiring.json``. That folder is the single
 QUAM-state authority for this device's setup (quam's own resolution via ~/.qualibrate
 or QUAM_STATE_PATH is deliberately bypassed). It also receives the device's ROSTER,
 the authority on which entities exist: the driver serves views BY ENTITY NAME
-(``q1_xy`` -> its drive view over QUAM's ``q1.xy``, ``q1_q2_c_z`` -> the pair's
-TunableCoupler), so the roster is threaded into the backend and every name resolves
+(the channel ``xy1.q1`` -> its drive view over QUAM's ``q1.xy``, the coupler's flux
+line ``zc12`` -> the pair's TunableCoupler, the operation ``q1_q2.iswap`` -> its
+gate macro), so the roster is threaded into the backend and every name resolves
 through it. Vendor imports stay INSIDE the function so loading this module is cheap
 and vendor-free. (The virtual-twin ``qm_sim`` mode was retired with v0.5.0.)
 """
@@ -29,14 +30,13 @@ if TYPE_CHECKING:
 def build_backend(cfg: LabConfig, setup: dict, roster: "Roster") -> Backend:
     if setup.get("backend") != "qm":
         raise SystemExit(f"the qm driver serves backend 'qm', got {setup.get('backend')!r}")
-    # State-authority rule checked BEFORE loading QUAM: fail before any state file
-    # is touched. Forbidden while qualibrate nodes still write QUAM directly (see
-    # scqo-qm CLAUDE.md); the migration finish line is flipping this to "push".
-    if cfg.state_sync != "pull":
-        raise SystemExit(
-            'lab config sets state_sync != "pull" for the QM backend: forbidden while '
-            "official qualibrate nodes can still write QUAM (see scqo-qm CLAUDE.md)"
-        )
+    # No backend-local state_sync guard: this one said "forbidden while qualibrate
+    # nodes can still write QUAM", and those nodes are gone (last release carrying
+    # them: v3.13.0). The CORE refusal in scqo's make_session stays and is the only
+    # one, because its reason is a different and still-live one -- a push seeds the
+    # vendor config from scqo_state.json with no history rows and would clobber hand
+    # edits of it. Re-adding a second check here would just split that decision in
+    # two. SCQO BACKLOG F7 is the question of when the core one lifts.
     folder = Path(setup["instrument_config"])
     missing = [n for n in ("state.json", "wiring.json") if not (folder / n).is_file()]
     if missing:

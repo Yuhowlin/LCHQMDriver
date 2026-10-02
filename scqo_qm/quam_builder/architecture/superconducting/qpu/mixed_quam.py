@@ -30,7 +30,9 @@ stores ``quam_config.my_quam.Quam`` resolves to whatever that module currently s
 
 from typing import Any, Dict, Optional, Union
 
+from quam.components.channels import MWChannel
 from quam.core import quam_dataclass
+from quam.serialisation import JSONSerialiser  # the return annotation below
 from quam_builder.architecture.superconducting.qpu.flux_tunable_quam import (
     FluxTunableQuam,
 )
@@ -39,6 +41,8 @@ from quam_builder.architecture.superconducting.qubit_pair import (
     AnyTransmonPair,
     FluxTunableTransmonPair,
 )
+
+from scqo_qm.quam_io import INCLUDE_DEFAULTS
 
 __all__ = ["MixedTransmonQuam", "flux_line"]
 
@@ -68,6 +72,15 @@ class MixedTransmonQuam(FluxTunableQuam):
     # thing standing between this root and a mixed tree.
     qubits: Dict[str, AnyTransmon] = None
     qubit_pairs: Dict[str, AnyTransmonPair] = None
+    #: the elements that REALIZE scqo's borrowed drive channels, keyed by the scqo
+    #: ADDRESS ``<line>.<target>`` (``"xy2.q1_q2_c"``: the coupler q1_q2_c driven
+    #: through q2's xy wire). Each is a plain MWChannel on the line's port - on that
+    #: port's second upconverter - with its ``id`` = the address, which is also its
+    #: QM element name. Written only by ``scqo-qm adopt-channel``; the driver finds
+    #: an entry by address (``QMDeviceModel._borrowed_view``). Not part of any
+    #: qubit's ``channels``, so a probe aligns it explicitly. SCQO
+    #: docs/coupler-transmon-plan.md section 2.
+    borrowed_channels: Dict[str, MWChannel] = None
 
     def __post_init__(self, *args, **kwargs):
         # dataclass fields default to None above rather than field(default_factory=dict)
@@ -76,11 +89,48 @@ class MixedTransmonQuam(FluxTunableQuam):
             self.qubits = {}
         if self.qubit_pairs is None:
             self.qubit_pairs = {}
+        if self.borrowed_channels is None:
+            self.borrowed_channels = {}
         super().__post_init__(*args, **kwargs)
 
     @classmethod
     def load(cls, *args, **kwargs) -> "MixedTransmonQuam":
         return super().load(*args, **kwargs)
+
+    def to_dict(self, *args, **kwargs) -> dict:
+        """QUAM's dict of this tree, WITHOUT an empty ``borrowed_channels``.
+
+        A tree that adopts nothing then saves exactly as before the field existed,
+        so an older scqo-qm still loads it and a setup snapshot of it still parses
+        equal to its state.json; the key appears once ``scqo-qm adopt-channel``
+        writes a channel. The serialiser and ``vendor_config_snapshot`` both go
+        through here."""
+        contents = super().to_dict(*args, **kwargs)
+        if not self.borrowed_channels:
+            contents.pop("borrowed_channels", None)
+        return contents
+
+    @classmethod
+    def get_serialiser(cls) -> JSONSerialiser:
+        """QUAM's serialiser with ``include_defaults`` pinned (``scqo_qm.quam_io``).
+
+        Left unset, QUAM looks it up in ``~/.qualibrate/config.toml`` on every save
+        that does not pass it, and raises FileNotFoundError on a machine that has no
+        such file (issue #38). scqo's own saves pass it explicitly; this covers the
+        ones no scqo call site reaches — the bare ``machine.save()`` inside
+        quam_builder's ``build_quam_wiring`` / ``build_quam``, and the register_*
+        scripts. It is QUAM's documented extension point, and it applies to every
+        lab state, because each one names this class as its root ``__class__``.
+
+        EXTEND the vendor's serialiser, never replace it: quam_builder's
+        ``BaseQuam.get_serialiser`` carries the ``content_mapping`` that splits
+        ``wiring`` / ``network`` out into ``wiring.json``. A fresh ``JSONSerialiser``
+        would write the whole tree into ``state.json`` and leave ``wiring.json``
+        stale beside it.
+        """
+        serialiser = super().get_serialiser()
+        serialiser.include_defaults = INCLUDE_DEFAULTS
+        return serialiser
 
     # ------------------------------------------------------------------ flux points
     def apply_all_flux_to_joint_idle(self) -> None:

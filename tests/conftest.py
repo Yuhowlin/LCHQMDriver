@@ -1,9 +1,12 @@
 """Shared fixtures for the QM driver tests (greenfield entity model).
 
-The backend now takes the device ROSTER: a driver serves a view per CHANNEL
-ENTITY (``q1_ro`` / ``q1_xy`` / ``q1_z``) over the matching SUBTREE of one QUAM
-qubit, and only the roster says what those names mean. :data:`ROSTER_TOML`
-describes the fixture chip in the schema-3 vocabulary.
+The backend takes the device ROSTER: a driver serves a view per ENTITY, and
+since SCQO 4.0.0 an entity's name is its ADDRESS - a channel ``<line>.<target>``
+(``fl.q1`` / ``xy1.q1`` / ``z1.q1``) over the matching SUBTREE of one QUAM
+qubit, a flux LINE (``z1``) over the one flux element it carries, a declared
+operation ``<pair>.<op>`` (``q1_q2.cz``) over its gate macro - and only the
+roster says what those names mean. :data:`ROSTER_TOML` describes the fixture
+chip in the components.toml schema-3 vocabulary (unchanged by 4.0.0).
 
 Two machine fixtures, deliberately:
 
@@ -14,9 +17,9 @@ Two machine fixtures, deliberately:
   legitimate working-tree situation, not a test failure.
 * :func:`stub_machine` is a hand-built stand-in with the same SHAPE, so the
   entity-resolution surface (component/components/snapshot, both flux shapes,
-  the pair knobs) is covered on every run, toggle or no toggle. It is a stub of
-  the vendor TREE only — every neutral conversion under test is the real
-  ``scqo_qm.quam_fields`` code.
+  the operation knobs) is covered on every run, toggle or no toggle. It is a
+  stub of the vendor TREE only — every neutral conversion under test is the
+  real ``scqo_qm.quam_fields`` code.
 
 The stub deliberately names its QUAM pair after the coupler (``coupler_q1_q2``,
 which is what quam_builder does) while the roster calls the composite ``q1_q2``
@@ -30,12 +33,35 @@ from types import SimpleNamespace
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def hide_the_qualibrate_config(monkeypatch, tmp_path_factory):
+    """No test may read ``~/.qualibrate/config.toml`` — not even indirectly.
+
+    QUAM resolves two things through that file when it is not told them: where a bare
+    save writes, and whether default-valued fields are written at all (issue #38). A
+    machine that runs the qualibrate GUI has the file, so a suite that silently leans
+    on it passes here and fails on a fresh machine - which is exactly how #38 reached
+    an operator. Pointing ``QUAM_CONFIG_FILE`` at a path that does not exist makes
+    every lookup fail, so anything still leaning on one fails HERE.
+
+    Not ``HOME``: ``qualibrate_config`` computes its directory at import, so moving
+    ``HOME`` afterwards changes nothing. ``tests/test_quam_save_hermetic.py`` asserts
+    the lookup really does raise under this fixture, so it cannot pass vacuously.
+    """
+    missing = tmp_path_factory.getbasetemp() / "no-qualibrate" / "config.toml"
+    monkeypatch.setenv("QUAM_CONFIG_FILE", str(missing))
+
 #: The fixture chip in the greenfield schema: ONE multiplexed feedline (the
-#: readout riders mint q1_res/q1_ro, ...), a drive wire per qubit, a flux wire
-#: for the two flux-tunable qubits and for the coupler MODE (its standing bias
-#: is idle_flux on q1_q2_c_z, not a pair field), and a fixed-frequency q3 with
-#: no flux rider at all. The pair composite declares one operation, so its
-#: per-operation knob family is cz_coupler_flux / cz_vz_high_rad / ...
+#: readout riders mint q1_res and the channel fl.q1, ...), a drive wire per
+#: qubit (xy1.q1, ...), a flux wire for the two flux-tunable qubits and for the
+#: coupler MODE (its standing bias is idle_flux on its own flux LINE zc, not a
+#: pair field), and a fixed-frequency q3 with no flux rider at all. The pair
+#: composite declares two operations, each an entity of its own (q1_q2.cz,
+#: q1_q2.iswap) carrying OPERATION_FIELDS by plain name (coupler_flux,
+#: vz_high_rad, ...). Every drive line also reaches the modes it does not carry
+#: by design - the BORROWED channels xy1.q2, xy2.q1_q2_c, ... - which the stub
+#: tree below does not adopt.
 ROSTER_TOML = """\
 schema = 3
 
@@ -140,12 +166,19 @@ def _xy(rf: float) -> SimpleNamespace:
     )
 
 
-def _resonator(rf: float) -> SimpleNamespace:
+def _resonator(rf: float, name: str = "q.resonator") -> SimpleNamespace:
     return SimpleNamespace(
+        # every QUAM channel carries its element name; the config is keyed by it
+        name=name,
         RF_frequency=rf,
         f_01=rf,
         LO_frequency=6.06e9,
+        # every real QUAM resonator carries one; readout_time_of_flight both
+        # reads it and temporarily writes it, so a stub without it fails on
+        # attribute access rather than on anything this driver decides
+        time_of_flight=28,
         opx_output=SimpleNamespace(full_scale_power_dbm=-11),
+        opx_input=SimpleNamespace(port_id=1),
         operations={"readout": ReadoutPulse()},
     )
 
@@ -185,7 +218,7 @@ def _qubit(name: str, *, f_01: float, res_rf: float,
         # the drive RF IS f_01: set_drive_freq writes both to one absolute value
         # and drive_frequency_problems refuses a tree where they differ (exactly
         # how _resonator pairs RF_frequency with f_01)
-        xy=_xy(f_01), resonator=_resonator(res_rf),
+        xy=_xy(f_01), resonator=_resonator(res_rf, f"{name}.resonator"),
         # a Thermalizing*Transmon carries this; stock QUAM classes do NOT (the
         # stale_qubit fixture below stands in for one), and the difference is
         # exactly what set_thermalization_time refuses on.
@@ -218,11 +251,12 @@ def make_stub_machine() -> SimpleNamespace:
                 phase_shift_control=0.0, phase_shift_target=0.0,
             ),
             # The LAB's ISwapImplementation shape, and the reason it is here: the
-            # <op>_coupler_flux binding was written against the CZ shape only, so
-            # a stub carrying just that shape passed while every pair on the real
-            # chip — where every macro is an ISwapImplementation — read None and
-            # refused writes. It declares NO coupler_flux_pulse and names one
-            # flux_pulse played on both the control's z line and the coupler.
+            # operation knob coupler_flux (pre-4.0.0: <op>_coupler_flux) was
+            # bound against the CZ shape only, so a stub carrying just that shape
+            # passed while every pair on the real chip — where every macro is an
+            # ISwapImplementation — read None and refused writes. It declares NO
+            # coupler_flux_pulse and names one flux_pulse played on both the
+            # control's z line and the coupler.
             "iswap": SimpleNamespace(
                 flux_pulse="swap_flattop",
                 phase_shift_control=0.0, phase_shift_target=0.0,
@@ -254,8 +288,9 @@ def backend(stub_machine, roster):
 
 def recording_device(backend, roster):
     """The device surface an experiment reads through — what the Session hands
-    to ``exp.device``: channel-entity views over the vendor tree, knobs seeded
-    from the instrument (pull), backed by an in-memory store."""
+    to ``exp.device``: entity views (channels, flux lines, operations) over the
+    vendor tree, knobs seeded from the instrument (pull), backed by an in-memory
+    store."""
     from scqo.device import RecordingDevice
     from scqo.stores import state_store
 

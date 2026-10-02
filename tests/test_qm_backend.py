@@ -3,9 +3,10 @@
 Three tiers:
 
 * ``_to_canonical`` and catalog registration are pure (no instrument, no QUAM).
-* The greenfield ENTITY surface (component resolution, the per-kind channel
-  views, the composite pair knobs, snapshot/power_context) runs against the stub
-  QUAM tree from ``conftest.py`` — always, on every machine.
+* The greenfield ENTITY surface (component resolution by SCQO 4.0.0 address,
+  the per-kind channel views, the flux LINE, the operation knobs, borrowed
+  channels, snapshot/power_context/line_ports) runs against the stub QUAM tree
+  from ``conftest.py`` — always, on every machine.
 * Probe equivalence and the absolute-power chain solve load the LIVE
   ``quam_state/``. These no longer skip: the state file and ``quam_config.Quam``
   both name ``MixedTransmonQuam``, which validates fixed, tunable and mixed trees
@@ -190,59 +191,152 @@ def test_catalog_registers_qm_experiments():
 # ------------------------------------------------ entity surface (stub QUAM tree)
 
 def test_component_resolves_channel_entities_per_kind(backend, stub_machine):
-    """One view class per CHANNEL KIND over the SAME QUAM qubit: the three names
-    a qubit's channels carry land on q.xy / q.resonator / q.z, and each view's
-    ``.name`` is the ENTITY name while the vendor object is the subtree."""
+    """One view class per CHANNEL KIND over the SAME QUAM qubit: the three
+    channel addresses a qubit carries (``<line>.<target>``) land on q.xy /
+    q.resonator / q.z, and each view's ``.name`` is the ENTITY address while the
+    vendor object is the subtree. The flux LINE z1 resolves onto the same q.z -
+    it owns the knobs, the channel z1.q1 is the knob-free vendor door."""
     q1 = stub_machine.qubits["q1"]
 
-    xy = backend.device.component("q1_xy")
-    ro = backend.device.component("q1_ro")
-    z = backend.device.component("q1_z")
+    xy = backend.device.component("xy1.q1")
+    ro = backend.device.component("fl.q1")
+    z = backend.device.component("z1.q1")
+    line = backend.device.component("z1")
 
-    assert (xy.kind, ro.kind, z.kind) == ("drive", "readout", "flux")
-    assert (xy.name, ro.name, z.name) == ("q1_xy", "q1_ro", "q1_z")
+    assert (xy.kind, ro.kind, z.kind, line.kind) == ("drive", "readout", "flux", "line")
+    assert (xy.name, ro.name, z.name, line.name) == ("xy1.q1", "fl.q1", "z1.q1", "z1")
     assert xy.vendor is q1.xy and ro.vendor is q1.resonator and z.vendor is q1.z
-    assert xy.qubit is q1 and ro.qubit is q1 and z.qubit is q1
+    assert line.vendor is q1.z
+    assert xy.qubit is q1 and ro.qubit is q1 and z.qubit is q1 and line.qubit is q1
 
 
 def test_component_refuses_everything_that_carries_no_knobs(backend):
     """The contract scqo degrades gracefully against: a KeyError, naming what to
-    address instead, for an unknown name, a MODE, a LINE, and a resonator mode
-    (knobs live on channels since the greenfield split)."""
+    address instead, for an unknown name, a MODE, a line carrying no flux (only
+    a flux line owns fields of its own), a resonator mode, and - since SCQO
+    4.0.0 - a COMPOSITE, whose knobs live on its declared operations."""
     with pytest.raises(KeyError, match="not in this device's roster"):
         backend.device.component("nope")
-    with pytest.raises(KeyError, match="q1_ro"):
+    with pytest.raises(KeyError, match=r"fl\.q1"):
         backend.device.component("q1")       # a mode: address its channels
-    with pytest.raises(KeyError, match="q1_z"):
+    with pytest.raises(KeyError, match=r"z1\.q1"):
         backend.device.component("q1")
-    with pytest.raises(KeyError):
-        backend.device.component("fl")       # a line
+    with pytest.raises(KeyError, match="no flux channel"):
+        backend.device.component("fl")       # the feedline: its channels only
+    with pytest.raises(KeyError, match=r"xy1\.q1"):
+        backend.device.component("xy1")      # a drive line: likewise
     with pytest.raises(KeyError):
         backend.device.component("q1_res")   # the minted resonator mode
+    with pytest.raises(KeyError, match=r"q1_q2\.cz"):
+        backend.device.component("q1_q2")    # a composite: its operations
+
+
+def test_a_borrowed_channel_is_refused_until_the_vendor_adopts_it(backend, roster):
+    """A drive line reaches every drivable mode, so the roster carries BORROWED
+    channels nobody declared (the coupler through a neighbour's line, a qubit
+    through a foreign one). None is realized until the QUAM state holds an
+    element for it: component() refuses naming the adoption step, so the
+    inventory and the pull seed never list one, and through the recording
+    device a read has no value while a write is refused by the driver."""
+    from conftest import recording_device
+
+    borrowed = roster.borrowed_channels()
+    assert {"xy2.q1_q2_c", "xy1.q2"} <= set(borrowed)
+    for name in ("xy2.q1_q2_c", "xy1.q2"):
+        with pytest.raises(KeyError, match="adopt"):
+            backend.device.component(name)
+    assert not set(backend.device.components()) & set(borrowed)
+    assert not set(backend.device.snapshot()) & set(borrowed)
+
+    device = recording_device(backend, roster)
+    view = device.channel_on("xy2", "q1_q2_c")
+    with pytest.raises(KeyError, match="no value yet"):
+        _ = view.pi_amp
+    with pytest.raises(KeyError, match="scqo-qm adopt-channel xy2.q1_q2_c"):
+        view.pi_amp = 0.2
+
+
+def _adopted(stub_machine, *, ops=("x180", "x90")):
+    """An adopted element for xy2.q1_q2_c on the stub tree, filed where
+    ``scqo-qm adopt-channel`` files it: ``borrowed_channels[<address>]``."""
+    from conftest import Pulse
+
+    element = SimpleNamespace(
+        name="xy2.q1_q2_c", RF_frequency=7.05e9, LO_frequency=7.1e9, upconverter=2,
+        opx_output=SimpleNamespace(full_scale_power_dbm=7),
+        operations={op: Pulse(amplitude=0.25 if op == "x180" else 0.125,
+                              length=200, alpha=0.0) for op in ops})
+    stub_machine.borrowed_channels = {"xy2.q1_q2_c": element}
+    return element
+
+
+def test_an_adopted_borrowed_channel_is_served_on_its_own_element(stub_machine, roster):
+    """Once the tree files an element under the address, the channel is realized:
+    the pulse knobs read and write THAT element (never the line's qubit), the two
+    unrealized knobs refuse by name, and the inventory and the pull seed list it."""
+    from scqo_qm.backend.qm_backend import QMBackend, QMBorrowedDriveChannel
+
+    element = _adopted(stub_machine)
+    backend = QMBackend(stub_machine, roster=roster)
+    view = backend.device.component("xy2.q1_q2_c")
+    assert isinstance(view, QMBorrowedDriveChannel) and view.vendor is element
+    assert (view.pi_amp, view.pi_amp_x90, view.drive_freq_hz) == (0.25, 0.125, 7.05e9)
+    view.pi_amp = 0.3
+    assert element.operations["x180"].amplitude == 0.3
+    assert stub_machine.qubits["q2"].xy.operations["x180"].amplitude == 0.2  # untouched
+    for field in ("drive_amp", "drive_power_dbm", "thermalization_time_s"):
+        with pytest.raises(NotImplementedError):
+            getattr(view, field)
+    with pytest.raises(ValueError, match="IF window"):
+        view.drive_freq_hz = 7.5e9
+    assert "xy2.q1_q2_c" in backend.device.components()
+    assert backend.device.snapshot()["xy2.q1_q2_c"]["pi_amp"] == 0.3
+    # the other borrowed channels stay refused
+    with pytest.raises(KeyError, match="adopt"):
+        backend.device.component("xy1.q2")
+
+
+def test_an_adopted_channel_missing_an_operation_refuses_loudly(stub_machine, roster):
+    """quam_fields' qubit helpers read 0.0 and drop a write when an operation is
+    absent; on an adopted element that is a refusal, never a silent value."""
+    from scqo_qm.backend.qm_backend import QMBackend
+
+    _adopted(stub_machine, ops=("x180",))
+    view = QMBackend(stub_machine, roster=roster).device.component("xy2.q1_q2_c")
+    with pytest.raises(KeyError, match=r"no \['x90'\] operation"):
+        _ = view.pi_amp_x90
+    with pytest.raises(KeyError, match=r"no \['x90'\] operation"):
+        view.pi_amp_x90 = 0.1
 
 
 def test_component_names_the_missing_subtree_on_a_fixed_frequency_qubit(backend,
                                                                         roster):
     """q3 is a fixed ``transmon``: the roster declares no flux rider for it, so
-    no q3_z exists at all — and if one were declared the vendor hop would fail
-    naming the absent subtree rather than returning a half-wired view."""
+    no flux channel or line reaches it at all — and if one were declared the
+    vendor hop would fail naming the absent subtree rather than returning a
+    half-wired view."""
     assert ("q3", "flux") not in roster.defaults
-    assert backend.device.component("q3_ro").kind == "readout"
+    assert backend.device.component("fl.q3").kind == "readout"
 
 
-def test_flux_channel_serves_both_vendor_shapes(backend, stub_machine):
+def test_flux_line_serves_both_vendor_shapes(backend, stub_machine):
     """``idle_flux`` over a qubit's FluxLine AND over the pair's TunableCoupler —
-    the coupler's STANDING bias is an ordinary knob on the COUPLER MODE's own
-    flux channel (the pair-level coupler_decouple_v field is gone)."""
-    q1_z = backend.device.component("q1_z")
-    q1_z.idle_flux = -0.042
+    the coupler's STANDING bias is an ordinary knob on the coupler's own flux
+    LINE (the pair-level coupler_decouple_v field is gone). The flux CHANNELS
+    riding those lines stay the knob-free vendor doors onto the same elements."""
+    z1 = backend.device.component("z1")
+    z1.idle_flux = -0.042
     assert stub_machine.qubits["q1"].z.joint_offset == pytest.approx(-0.042)
 
-    coupler_z = backend.device.component("q1_q2_c_z")
-    assert coupler_z.qubit is None                      # not a QUAM qubit at all
-    assert coupler_z.vendor is stub_machine.qubit_pairs["coupler_q1_q2"].coupler
-    coupler_z.idle_flux = 0.031                         # flux_point 'off'
-    assert coupler_z.vendor.decouple_offset == pytest.approx(0.031)
+    zc = backend.device.component("zc")
+    assert zc.qubit is None                             # not a QUAM qubit at all
+    assert zc.vendor is stub_machine.qubit_pairs["coupler_q1_q2"].coupler
+    zc.idle_flux = 0.031                                # flux_point 'off'
+    assert zc.vendor.decouple_offset == pytest.approx(0.031)
+
+    coupler_channel = backend.device.component("zc.q1_q2_c")
+    assert coupler_channel.qubit is None and coupler_channel.vendor is zc.vendor
+    assert not hasattr(type(coupler_channel), "idle_flux")  # the LINE owns it
 
 
 def test_channel_views_round_trip_the_neutral_knobs(backend, stub_machine):
@@ -250,8 +344,8 @@ def test_channel_views_round_trip_the_neutral_knobs(backend, stub_machine):
     drive_freq_hz write lands ONE absolute value on both f_01 and
     xy.RF_frequency (scqo reads the first, the drive line plays the second)."""
     q2 = stub_machine.qubits["q2"]
-    xy = backend.device.component("q2_xy")
-    ro = backend.device.component("q2_ro")
+    xy = backend.device.component("xy2.q2")
+    ro = backend.device.component("fl.q2")
 
     xy.drive_freq_hz = 5.102e9
     assert float(q2.f_01) == pytest.approx(5.102e9)
@@ -279,7 +373,7 @@ def test_thermalization_time_round_trips_on_the_qubit(backend, stub_machine):
     than refused like pi_duration_s, because it is a policy wait, not a
     calibrated pulse."""
     q2 = stub_machine.qubits["q2"]
-    xy = backend.device.component("q2_xy")
+    xy = backend.device.component("xy2.q2")
 
     assert xy.thermalization_time_s is None  # never calibrated == unset
     xy.thermalization_time_s = 3.715492e-4
@@ -295,7 +389,7 @@ def test_thermalization_time_refuses_a_stock_quam_class(backend, stub_machine):
     so there is nowhere to store an absolute one. The refusal must name the fix
     (the qubit's state.json __class__) instead of silently doing nothing."""
     del stub_machine.qubits["q2"].thermalization_time_ns  # a stock transmon
-    xy = backend.device.component("q2_xy")
+    xy = backend.device.component("xy2.q2")
 
     assert xy.thermalization_time_s is None
     with pytest.raises(NotImplementedError, match="Thermalizing"):
@@ -350,40 +444,50 @@ def test_per_run_override_expands_a_pair_to_its_member_qubits(backend, stub_mach
 
 def test_snapshot_reports_the_bound_knobs_per_entity(backend):
     """The pull-mode seed source: every realized channel reports exactly the
-    knobs the fieldmap BINDS for its kind, and the composite reports the
-    per-operation knobs the ROSTER compiled for it."""
-    from scqo_qm.backend.fieldmap import FIELD_BINDINGS
+    knobs the fieldmap BINDS for its kind, a flux LINE its line knobs, and each
+    declared operation the OPERATION_FIELDS the fieldmap binds. An entity this
+    backend does not realize (every borrowed channel: none is adopted here) or
+    one with no bound knob (the knob-free flux channels) is absent."""
+    from scqo_qm.backend.fieldmap import FIELD_BINDINGS, OPERATION_BINDINGS
 
     snap = backend.device.snapshot()
-    assert set(snap["q1_xy"]) == set(FIELD_BINDINGS["drive"])
-    assert set(snap["q1_ro"]) == set(FIELD_BINDINGS["readout"])
-    assert set(snap["q1_z"]) == set(FIELD_BINDINGS["flux"])
-    # the composite's names are per-OPERATION, instantiated from the roster
-    assert "cz_coupler_flux" in snap["q1_q2"]
-    assert snap["q1_q2"]["cz_coupler_flux"] == pytest.approx(-0.125)
-    # an Unrealized composite knob degrades to None instead of crashing the seed
-    assert snap["q1_q2"]["cz_duration_s"] is None
+    assert set(snap) == {"xy1.q1", "xy2.q2", "xy3.q3", "fl.q1", "fl.q2", "fl.q3",
+                         "z1", "z2", "zc", "q1_q2.cz", "q1_q2.iswap"}
+    assert set(snap["xy1.q1"]) == set(FIELD_BINDINGS["drive"])
+    assert set(snap["fl.q1"]) == set(FIELD_BINDINGS["readout"])
+    assert set(snap["z1"]) == set(FIELD_BINDINGS["flux"])
+    # the operation's knobs carry plain OPERATION_FIELDS names
+    assert set(snap["q1_q2.cz"]) == set(OPERATION_BINDINGS)
+    assert snap["q1_q2.cz"]["coupler_flux"] == pytest.approx(-0.125)
+    assert snap["q1_q2.iswap"]["coupler_flux"] == pytest.approx(0.081)
+    # an Unrealized operation knob has no vendor value to seed from: it is
+    # absent instead of crashing the seed
+    assert "duration_s" not in snap["q1_q2.cz"]
 
 
-def test_composite_view_reads_and_writes_the_gate_knobs(backend, stub_machine):
-    """The QM pair surface Qblox has no counterpart for: per-operation knobs by
-    full field name, resolved against the roster's DECLARED operations and the
-    QUAM gate macro (matched case-insensitively — QUAM spells it "CZ")."""
-    macro = stub_machine.qubit_pairs["coupler_q1_q2"].macros["CZ"]
-    pair = backend.device.component("q1_q2")
+def test_operation_view_reads_and_writes_the_gate_knobs(backend, stub_machine):
+    """The QM pair surface Qblox has no counterpart for: one view per declared
+    OPERATION entity (``q1_q2.cz``), its knobs by plain OPERATION_FIELDS name,
+    realized on the QUAM gate macro (matched case-insensitively — QUAM spells it
+    "CZ")."""
+    pair_qp = stub_machine.qubit_pairs["coupler_q1_q2"]
+    macro = pair_qp.macros["CZ"]
+    cz = backend.device.component("q1_q2.cz")
+    assert cz.kind == "operation" and cz.name == "q1_q2.cz"
+    assert cz.vendor is pair_qp
 
-    assert pair.read_knob("cz_coupler_flux") == pytest.approx(-0.125)
-    pair.write_knob("cz_coupler_flux", -0.2)
+    assert cz.read_knob("coupler_flux") == pytest.approx(-0.125)
+    cz.write_knob("coupler_flux", -0.2)
     assert macro.coupler_flux_pulse.amplitude == pytest.approx(-0.2)
 
     # virtual Z: rad <-> turns, and the roster's high role (q2) is the QUAM
     # pair's TARGET here — resolved by name, never guessed
-    pair.write_knob("cz_vz_high_rad", np.pi)
+    cz.write_knob("vz_high_rad", np.pi)
     assert macro.phase_shift_target == pytest.approx(0.5)
     assert macro.phase_shift_control == pytest.approx(0.0)
-    pair.write_knob("cz_vz_low_rad", -np.pi / 2)
+    cz.write_knob("vz_low_rad", -np.pi / 2)
     assert macro.phase_shift_control == pytest.approx(-0.25)
-    assert pair.read_knob("cz_vz_low_rad") == pytest.approx(-np.pi / 2)
+    assert cz.read_knob("vz_low_rad") == pytest.approx(-np.pi / 2)
 
 
 def test_coupler_flux_resolves_the_lab_iswap_macro_shape(backend, stub_machine):
@@ -399,15 +503,16 @@ def test_coupler_flux_resolves_the_lab_iswap_macro_shape(backend, stub_machine):
     """
     pair_qp = stub_machine.qubit_pairs["coupler_q1_q2"]
     stored = pair_qp.coupler.operations["swap_flattop"]
-    pair = backend.device.component("q1_q2")
+    iswap = backend.device.component("q1_q2.iswap")
 
-    assert pair.read_knob("iswap_coupler_flux") == pytest.approx(0.081)
-    pair.write_knob("iswap_coupler_flux", 0.15)
+    assert iswap.read_knob("coupler_flux") == pytest.approx(0.081)
+    iswap.write_knob("coupler_flux", 0.15)
     assert stored.amplitude == pytest.approx(0.15)      # the COUPLER's pulse moved
-    assert pair.read_knob("iswap_coupler_flux") == pytest.approx(0.15)
+    assert iswap.read_knob("coupler_flux") == pytest.approx(0.15)
 
     # the two shapes stay independent: writing one must not touch the other
-    assert pair.read_knob("cz_coupler_flux") == pytest.approx(-0.125)
+    assert backend.device.component("q1_q2.cz").read_knob(
+        "coupler_flux") == pytest.approx(-0.125)
 
 
 def test_coupler_flux_reads_none_only_for_a_genuinely_fixed_coupler(backend, stub_machine):
@@ -415,15 +520,16 @@ def test_coupler_flux_reads_none_only_for_a_genuinely_fixed_coupler(backend, stu
     that is the ONLY case that reads None. A macro of an unfamiliar shape must
     not be silently reported as fixed-coupler — that misreads the device."""
     macros = stub_machine.qubit_pairs["coupler_q1_q2"].macros
-    pair = backend.device.component("q1_q2")
+    cz = backend.device.component("q1_q2.cz")
 
     macros["CZ"].coupler_flux_pulse = None       # declared, and empty
-    assert pair.read_knob("cz_coupler_flux") is None
+    assert cz.read_knob("coupler_flux") is None
     with pytest.raises(KeyError, match="plays no coupler pulse"):
-        pair.write_knob("cz_coupler_flux", 0.1)
+        cz.write_knob("coupler_flux", 0.1)
 
     # ...while the iswap-shaped macro beside it still resolves
-    assert pair.read_knob("iswap_coupler_flux") == pytest.approx(0.081)
+    assert backend.device.component("q1_q2.iswap").read_knob(
+        "coupler_flux") == pytest.approx(0.081)
 
 
 def test_the_stub_carries_both_macro_shapes(stub_machine):
@@ -436,20 +542,29 @@ def test_the_stub_carries_both_macro_shapes(stub_machine):
     assert isinstance(macros["iswap"].flux_pulse, str)
 
 
-def test_composite_view_refuses_undeclared_and_unrealized_knobs(backend):
+def test_operation_view_refuses_undeclared_and_unrealized_knobs(backend, roster):
     """Exact-cause errors: an undeclared operation names the declared set, a
-    non-knob name names the legal suffixes, and a suffix QM cannot realize
-    raises NotImplementedError with its reason (never a silent no-op)."""
-    pair = backend.device.component("q1_q2")
+    name that is no operation field names the legal ones, and a field QM cannot
+    realize raises NotImplementedError with its reason (never a silent no-op).
 
-    with pytest.raises(KeyError, match="not declared on this composite"):
-        pair.read_knob("cnot_coupler_flux")   # cz and iswap are declared; cnot is not
-    with pytest.raises(KeyError, match="not a per-operation knob"):
-        pair.read_knob("coupler_flux")
+    Since SCQO 4.0.0 an operation is an ENTITY, so an undeclared one is an
+    unknown name: the driver refuses it like any other, and the exact cause is
+    the roster's, served on the surface a session and a probe address."""
+    from conftest import recording_device
+
+    # cz and iswap are declared; cnot is not
+    with pytest.raises(KeyError, match=r"q1_q2\.cnot"):
+        backend.device.component("q1_q2.cnot")
+    with pytest.raises(KeyError, match=r"not declared on 'q1_q2'.*'cz', 'iswap'"):
+        recording_device(backend, roster).operation("q1_q2", "cnot")
+
+    cz = backend.device.component("q1_q2.cz")
+    with pytest.raises(KeyError, match="not an operation field"):
+        cz.read_knob("cz_coupler_flux")   # the retired pre-4.0.0 flattened name
     with pytest.raises(NotImplementedError, match="FLUX-activated"):
-        pair.read_knob("cz_drive_freq_hz")
+        cz.read_knob("drive_freq_hz")
     with pytest.raises(NotImplementedError):
-        pair.write_knob("cz_duration_s", 40e-9)
+        cz.write_knob("duration_s", 40e-9)
 
 
 def test_power_context_matches_the_views(backend, stub_machine):
@@ -462,9 +577,9 @@ def test_power_context_matches_the_views(backend, stub_machine):
     assert ctx["q1"]["readout_amplitude"] == pytest.approx(
         float(q1.resonator.operations["readout"].amplitude))
     assert ctx["q1"]["readout_power_dbm"] == pytest.approx(
-        backend.device.component("q1_ro").readout_power_dbm)
+        backend.device.component("fl.q1").readout_power_dbm)
     assert ctx["q1"]["drive_power_dbm"] == pytest.approx(
-        backend.device.component("q1_xy").drive_power_dbm)
+        backend.device.component("xy1.q1").drive_power_dbm)
     assert ctx["q1"]["readout_lo_freq_hz"] == pytest.approx(
         float(q1.resonator.LO_frequency))
     assert ctx["nonexistent"] == {}  # unknown target degrades, never raises
@@ -480,19 +595,19 @@ def test_distortion_apply_command_is_the_hint_hook_scqo_asks_for(backend):
 
     assert callable(getattr(backend, HOOK, None))  # the name scqo actually asks
     assert backend.distortion_apply_command("q1", "RUN-1") == (
-        "python -m scqo_qm.backend.apply_distortion --target q1 --run RUN-1")
+        "scqo-qm apply-distortion --target q1 --run RUN-1")
     assert backend.distortion_apply_command("q2") == (
-        "python -m scqo_qm.backend.apply_distortion --target q2")
+        "scqo-qm apply-distortion --target q2")
 
     lines = apply_hint_lines("qubit_ramsey_cryoscope", backend, ["q1"], "RUN-1")
-    assert any("apply_distortion --target q1 --run RUN-1" in line for line in lines)
+    assert any("scqo-qm apply-distortion --target q1 --run RUN-1" in line for line in lines)
 
 
 def test_readout_power_dbm_solves_the_chain_bidirectionally(backend, stub_machine):
     """Absolute power: the setter re-solves (full_scale_power_dbm, amplitude) with
     the SMALLEST grid full-scale keeping amp <= 0.5 — bidirectional (a lower target
     lowers full scale again, unlike the bare power_tools helper)."""
-    view = backend.device.component("q1_ro")
+    view = backend.device.component("fl.q1")
     res = stub_machine.qubits["q1"].resonator
 
     view.readout_power_dbm = -2.0
@@ -513,13 +628,13 @@ def test_readout_power_dbm_solves_the_chain_bidirectionally(backend, stub_machin
     res.operations["readout"].amplitude = 0.0
     with pytest.raises(ValueError, match="absolute power undefined"):
         _ = view.readout_power_dbm
-    assert backend.device.snapshot()["q1_ro"]["readout_power_dbm"] is None
+    assert backend.device.snapshot()["fl.q1"]["readout_power_dbm"] is None
 
 
 def test_drive_power_dbm_solves_the_same_chain_on_xy(backend, stub_machine):
     """The drive twin: same grid solve on the xy channel + the saturation op;
     drive_amp is the coupled residual."""
-    view = backend.device.component("q1_xy")
+    view = backend.device.component("xy1.q1")
     xy = stub_machine.qubits["q1"].xy
 
     view.drive_power_dbm = -21.0
@@ -533,21 +648,52 @@ def test_drive_power_dbm_solves_the_same_chain_on_xy(backend, stub_machine):
     xy.operations["saturation"].amplitude = 0.0
     with pytest.raises(ValueError, match="absolute power undefined"):
         _ = view.drive_power_dbm
-    assert backend.device.snapshot()["q1_xy"]["drive_power_dbm"] is None
+    assert backend.device.snapshot()["xy1.q1"]["drive_power_dbm"] is None
 
 
 def test_recording_device_seeds_and_pushes_through_the_channel_entities(backend,
                                                                         roster):
     """End to end the way a Session drives it: RecordingDevice seeds its runtime
-    config from the vendor (pull) and a neutral write lands on QUAM."""
+    config from the vendor (pull) and a neutral write lands on QUAM - through a
+    channel, and since SCQO 4.0.0 through the coupler's flux LINE (its standing
+    bias) and a declared operation (its gate knobs)."""
     from conftest import recording_device
 
     device = recording_device(backend, roster)
+    coupler = backend.machine.qubit_pairs["coupler_q1_q2"].coupler
     assert device.channel("q1", "readout").readout_freq_hz == pytest.approx(6.10e9)
-    assert device.channel("q1_q2_c", "flux").idle_flux == pytest.approx(0.0)
+    assert device.flux_line("q1_q2_c").idle_flux == pytest.approx(0.0)
+    assert device.operation("q1_q2", "cz").read_knob(
+        "coupler_flux") == pytest.approx(-0.125)
 
     device.channel("q1", "drive").pi_amp = 0.31
-    assert backend.device.component("q1_xy").pi_amp == pytest.approx(0.31)
+    assert backend.device.component("xy1.q1").pi_amp == pytest.approx(0.31)
+    device.flux_line("q1_q2_c").idle_flux = 0.05
+    assert coupler.decouple_offset == pytest.approx(0.05)
+
+
+def test_line_ports_label_each_roster_line_by_its_designed_channels(backend,
+                                                                   stub_machine):
+    """``line_ports()`` is DISPLAY only (``scqo state`` prints it beside each
+    roster line), so it never raises: the bare stub names no output port and
+    reports nothing. Once the elements carry MW-FEM port tuples, each line is
+    labelled from ITS designed channels - a port shared by several channels
+    once, two ports joined, a second upconverter marked, a flux line from its z
+    element - and a line whose element names no output stays absent."""
+    assert backend.line_ports() == {}
+
+    q1, q2, q3 = (stub_machine.qubits[n] for n in ("q1", "q2", "q3"))
+    q1.resonator.opx_output.port_tuple = ("con1", 1, 1)
+    q2.resonator.opx_output.port_tuple = ("con1", 1, 1)   # multiplexed with q1
+    q3.resonator.opx_output.port_tuple = ("con1", 2, 1)   # read through a 2nd port
+    q1.xy.opx_output.port_tuple = ("con1", 1, 2)
+    q2.xy.opx_output.port_tuple = ("con1", 1, 2)
+    q2.xy.upconverter = 2
+    q1.z.opx_output = SimpleNamespace(port_tuple=("con1", 3, 1))
+
+    assert backend.line_ports() == {
+        "fl": "con1/1/1, con1/2/1", "xy1": "con1/1/2", "xy2": "con1/1/2 up2",
+        "z1": "con1/3/1"}                     # xy3, z2, zc: no nameable output
 
 
 def test_roster_toml_for_a_quam_tree_parses(stub_machine):
@@ -573,10 +719,14 @@ def test_roster_toml_for_a_quam_tree_parses(stub_machine):
     assert pair.roles["coupler"] == ("q1_q2_c",)
 
     # ...and every name it declares resolves through the backend against the
-    # same tree — which is what the skipped live-machine tests below rely on
+    # same tree — which is what the skipped live-machine tests below rely on:
+    # each designed channel, each flux LINE (the coupler's wire included) and
+    # each declared operation. A composite itself has no view since SCQO 4.0.0.
     generated_backend = QMBackend(stub_machine, roster=generated)
+    flux_lines = {"z_q1", "z_q2", "z_q1_q2_c"}
     assert set(generated_backend.device.components()) == (
-        set(generated.channels()) | set(generated.composites()))
+        set(generated.channels()) | flux_lines
+        | set(generated.operation_entities()))
     assert generated_backend.device.component(
         generated.default_channel("q1", "readout")).kind == "readout"
 
@@ -1139,11 +1289,9 @@ def test_power_amp_probe_builds_with_new_loop_order(machine, live_roster):
 
 
 def test_readout_fidelity_probe_state_selection_compiles(machine, live_roster):
-    """The one probe now serves three experiments by prepared_states alone. All
-    three must COMPILE against the live config — the |f> branch plays inside a
-    switch_ and retunes the drive element mid-case, which is where a QUA build
-    would break — and the two-state default must stay byte-identical to what it
-    generated before the parameter existed."""
+    """The one probe serves two experiments by prepared_states alone. Both must
+    COMPILE against the live config, and the two-state default must stay
+    byte-identical to what it generated before the parameter existed."""
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
@@ -1157,8 +1305,6 @@ def test_readout_fidelity_probe_state_selection_compiles(machine, live_roster):
         )
 
     names = ["q1"]
-    if not machine.qubits[names[0]].xy.operations.get("EF_x180"):
-        pytest.skip("q1 has no calibrated EF_x180 in the live state")
     qubits = select_qubits(machine, names, multiplexed=True)
     common = dict(operation="readout", num_shots=10, reset_type="thermal")
 
@@ -1166,11 +1312,6 @@ def test_readout_fidelity_probe_state_selection_compiles(machine, live_roster):
     explicit, _ = fidelity_probe.build_program(machine, qubits, prepared_states=(0, 1), **common)
     assert script(default) == script(explicit)
     assert list(axes["prepared_state"].values) == [0, 1]
-
-    gef, gef_axes = fidelity_probe.build_program(
-        machine, qubits, prepared_states=(0, 1, 2), readout_freq_shift_hz=-600e3, **common)
-    assert script(gef)  # the EF case + the resonator shift assemble
-    assert list(gef_axes["prepared_state"].values) == [0, 1, 2]
 
     ground, ground_axes = fidelity_probe.build_program(machine, qubits, prepared_states=(0,), **common)
     assert script(ground)
@@ -1688,10 +1829,10 @@ def test_ade_tracking_program_builds_on_live_state(machine, live_roster):
 
 
 def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
-    """The u = 1/k posterior update (Math.inv/ln/exp, both phi branches) and
-    the QUAM confusion-matrix reads serialise against the live config.
-    Thresholds — and the confusion matrix when the live state lacks one — are
-    written in memory and restored as plain lists (no QuamList re-parenting)."""
+    """The u = 1/k posterior update (Math.inv/ln/exp, both phi branches) serialises
+    against the live config. The SPAM pair is a builder ARGUMENT (the shell reads the
+    readout channel's measured fidelities), so only the thresholds are written in
+    memory here, and they are restored."""
     from qm import generate_qua_script
 
     from scqo_qm.experiments._lib import select_qubits
@@ -1705,18 +1846,15 @@ def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
 
     qubit = machine.qubits[name]
     pulse = qubit.resonator.operations["readout"]
-    cm = qubit.resonator.confusion_matrix
-    saved_cm = None if cm is None else [list(row) for row in cm]
     saved = (pulse.threshold, pulse.rus_exit_threshold)
     try:
         pulse.threshold = -1.0e-4
         pulse.rus_exit_threshold = -2.0e-4
-        if qubit.resonator.confusion_matrix is None:
-            qubit.resonator.confusion_matrix = [[0.95, 0.05], [0.09, 0.91]]
         qubits = select_qubits(machine, [name], multiplexed=False)
         prog, _ = bayes_probe.build_program(
             machine, qubits, num_blocks=2, num_probes=5,
             c_adaptive=0.51, k0=1.0, t1_prior_s={name: 35e-6},
+            spam_pairs={name: (0.05, 0.09)},
             t1_min_s=1e-6, t1_max_s=100e-6, k_min=0.2, k_max=100.0,
             interleaved=True,
             lin_wait_cycles=np.array([4, 50, 500, 5000, 50000]),
@@ -1726,7 +1864,6 @@ def test_bayesian_tracking_program_builds_on_live_state(machine, live_roster):
         assert generate_qua_script(prog, machine.generate_config())
     finally:
         pulse.threshold, pulse.rus_exit_threshold = saved
-        qubit.resonator.confusion_matrix = saved_cm
 
 
 # ------------------------------------------------------- setup snapshot (stub)

@@ -1,18 +1,20 @@
 # scqo-qm — project guide
 
 ## Project Overview
-Two products in one repo (renamed from LCHQMDriver in the v1 restructure):
+One product (renamed from LCHQMDriver in the v1 restructure):
 1. **`scqo_qm/`** — the Quantum Machines backend for **`scqo`**, the vendor-neutral
    experiment API shared with the Qblox driver. It serves BOTH QM RF chains through
    one backend name: MW-FEM (OPX1000) and Octave (OPX+, or an OPX1000 with LF-FEMs).
    The chassis is the wrong axis to reason about - see [OPX-PLUS.md](OPX-PLUS.md) ([scqo-qblox](https://github.com/shiau109/scqo-qblox)), so the same experiment
    runs on either instrument through one `Session`. scqo is a HARD dependency.
-2. **Vendored official qualibrate calibrations** (`calibrations/` + `calibration_utils/`, copied in
-   by `sync_official.py`) — the qualibrate GUI path, official nodes only. The custom LCH_* qualibrate
-   shells were RETIRED in the v1 restructure; `calibrations/exclude/` + its `customized/node/`
-   packages are a frozen archive (never edit, never import from live code, not runnable).
+This repo used to carry a second product, the vendored official qualibrate calibrations
+(`calibrations/` + `calibration_utils/`) plus the frozen `customized/` archive of the retired
+LCH_* shells. All of it was REMOVED after v3.13.0, which is the last release (and the tag) that
+carries it; git history has the rest. Nothing here reads `~/.qualibrate`, and neither
+`qualibrate` nor `qualibration-libs` is a dependency — the two pieces this driver used are
+copied into `scqo_qm/_vendored/`.
 
-Vendor stack: **qm-qua** → **quam** → **qualibrate** (read-only in the workspace). Design, the
+Vendor stack: **qm-qua** → **quam** (read-only in the workspace). Design, the
 `Session` contract, and cross-repo terminology (Experiment = probe + estimator) live in
 `SCQO\CLAUDE.md`; analysis runs through scqat **estimators** inherited via scqo.
 
@@ -24,16 +26,30 @@ scqo_qm/
                          #   guard BEFORE any QUAM state is touched, loads the setup's vendor
                          #   folder (canonical names state.json + wiring.json; loud SystemExit
                          #   when missing), audits flux points/headroom/drive frequency, threads the ROSTER
+  cli.py                 # `scqo-qm <command>` console script: dispatches FROM
+                         #   fieldmap.OPERATOR_COMMANDS to backend/<name>.main(argv, prog).
+                         #   Vendor tools, NOT scqo subcommands. -h costs ~5 s: any import
+                         #   under scqo_qm runs the package __init__, which imports qm
   backend/
     qm_backend.py        # QMBackend (scqo.Backend) + QMDeviceModel + ONE view class per
-                         #   CHANNEL KIND (QMDriveChannel/QMReadoutChannel/QMFluxChannel)
-                         #   + QMQubitPair (composite view over the QUAM qubit_pair);
-                         #   acquire()/preview() live here
+                         #   CHANNEL KIND (QMDriveChannel/QMReadoutChannel/QMFluxChannel -
+                         #   the flux one knob-free, the probes' z door) + QMFluxLine (a
+                         #   flux LINE's idle_flux/flux_delay_s, SCQO 4.0.0) + QMOperation
+                         #   (a declared <pair>.<op> over its QUAM gate macro); a BORROWED
+                         #   channel (xy2.q1_q2_c) is QMBorrowedDriveChannel over the
+                         #   element adopt-channel filed under its address in
+                         #   machine.borrowed_channels - pulse knobs only, a missing op
+                         #   raises, drive power refused (I28) - and a KeyError naming
+                         #   adopt-channel until then; line_ports() labels each roster
+                         #   line's output for `scqo state`; acquire()/preview() live here;
+                         #   power_context reports a routed run's borrowed port and member
     fieldmap.py          # declarative neutral->vendor field catalog (pure data, per channel
                          #   kind) + VENDOR_ONLY, whose coupled/edit/counterpart carry the
                          #   OPERATIONAL half of a hand edit (what moves with it, what to
                          #   satisfy first, Qblox's name for it) + OPERATOR_COMMANDS, the
-                         #   CLIs below. Both inventories render in `scqo state --fields`,
+                         #   CLIs below - and scqo_qm/cli.py's DISPATCH TABLE (entry name =
+                         #   module name, `_`->`-` = subcommand; `scqo-qm -h` renders it
+                         #   unscoped). Both inventories render in `scqo state --fields`,
                          #   FILTERED to the tree's RF chain: VENDOR_ONLY splits COMMON /
                          #   MW_FEM / OCTAVE (the exported union is the complete inventory,
                          #   which is what the structural self-checks run against), and a
@@ -48,11 +64,17 @@ scqo_qm/
                          #   tree (test fixtures + scripts/check_real_config.py; the REAL roster
                          #   is <data_root>/<device>/components.toml)
     _distortion.py       # flux-distortion facts -> exponential-filter arithmetic (pure)
-    apply_distortion.py  # operator CLI: python -m scqo_qm.backend.apply_distortion
+    apply_distortion.py  # operator CLI: scqo-qm apply-distortion
                          #   (QMBackend.distortion_apply_command hands scqo's two
                          #   cryoscopes this command line as their writeback hint;
                          #   also listed by `scqo state --fields`)
-    close_qm.py          # operator CLI: python -m scqo_qm.backend.close_qm - halt
+    cluster.py           # operator CLI: scqo-qm cluster - READ-ONLY: the open QMs on
+                         #   the cluster (cluster-wide, every user's) and each one's
+                         #   unfinished jobs with start times. QOP 3.x get_jobs shows the
+                         #   queue; QOP 2.x falls back to get_running_job and says the
+                         #   queue is unknown. The one look-first door before close-qm,
+                         #   which therefore has no --dry-run of its own
+    close_qm.py          # operator CLI: scqo-qm close-qm - halt
                          #   jobs + close open QMs when a dead session still holds
                          #   the cluster's locks (QMBackend.close_qm does the work).
                          #   NOT the same thing as scqo's Backend.release_instruments
@@ -62,10 +84,10 @@ scqo_qm/
                          #   and there is nothing to hand back before a prompt. This
                          #   door is for a session that DIED mid-job. (scqo-qblox
                          #   implements the hook - it has no disconnect at all.)
-                         #   Listed by `scqo state --fields`, which is the only
-                         #   place an operator can DISCOVER it - `scqo -h` cannot
-                         #   show a command that is not a scqo subcommand.
-    calibrate_octave.py  # operator CLI: python -m scqo_qm.backend.calibrate_octave -
+                         #   Listed by `scqo-qm -h` and `scqo state --fields` -
+                         #   `scqo -h` cannot show a command that is not a scqo
+                         #   subcommand.
+    calibrate_octave.py  # operator CLI: scqo-qm calibrate-octave -
                          #   calibrate the Octave up-conversion mixers (LO leakage +
                          #   image) for the active setup. An MW-FEM synthesizes its own
                          #   microwave and has no such step, which is why nothing here
@@ -76,6 +98,22 @@ scqo_qm/
                          #   new IF, or a cold start. Results land in calibration_db.json,
                          #   OUTSIDE state.json - so vendor_config_snapshot cannot capture
                          #   them, and power_context records the digest instead.
+    adopt_channel.py     # operator CLI: scqo-qm adopt-channel <line>.<target> --lo-hz -
+                         #   MW-FEM only: realize a BORROWED drive channel as an MWChannel
+                         #   on the line's port, UPCONVERTER 2 (the port moves to the
+                         #   `upconverters` dict form; the band follows with its pair
+                         #   partner, which is never parked), x180/x90 cosines 200 ns at
+                         #   0.25/0.125, tuned to the target's f_01_hz. Same staged-save
+                         #   discipline as register-partial-swap; --list / --dry-run look
+                         #   first. SCQO docs/coupler-transmon-plan.md section 2
+    register_partial_swap.py  # operator CLI: scqo-qm register-partial-swap
+                         #   - add or retune a square partial swap on one pair of the
+                         #   active setup: control z pulse + coupler pulse
+                         #   (partial_swap_square_<t>) + ISwapImplementation macro
+                         #   (partial_swap_<t>). state.json is replaced only after a
+                         #   staged save proves nothing else changes, so an edit that
+                         #   landed on disk after loading is never overwritten. Step 2
+                         #   of SCQO/procedures/pair-partial-swap
   experiments/
     __init__.py          # one import line per experiment module so @register runs (manual;
                          #   tests/test_experiment_registration.py enforces completeness both
@@ -91,8 +129,17 @@ scqo_qm/
     _vendor.py           # the one door out of the neutral surface (raw QUAM element by ROSTER)
     _pair_roles.py       # joint-population digit reordering for the pair maps
     _qc_populations.py   # shared swap-reset population math
-    _readout_fidelity.py # shared SSRO builder (single_shot_readout / _gef / thermal_population)
+    _readout_fidelity.py # shared SSRO builder (single_shot_readout / thermal_population)
     _resonator_spectroscopy.py  # shared 1D builder (resonator_spectroscopy / _power_chain)
+    _coupler_tone.py     # the coupler tone's run-scoped LO move (moved_lo_config): only
+                         #   the tone element's OWN upconverter moves, and a band switch
+                         #   that would strand another upconverter is refused by name
+    _selective_pi.py     # a member's x180 area as a long square pulse (zz + the map)
+    _mapped_target.py    # MappedTarget: a transmon-shaped handle for a target driven
+                         #   through a named line and/or read through a pair member
+                         #   (drive_line / readout_member) - xy = the adopted element,
+                         #   readout_state = selective pi + x180 + the member's readout -
+                         #   so a qubit carrier's program body runs unchanged
   _family.py             # which hardware family a channel declares - duck-typed, never
                          #   isinstance (the suite builds channels as SimpleNamespace and
                          #   pins the flux guards against a port that is None). TWO
@@ -101,28 +148,46 @@ scqo_qm/
                          #   (lf_fem / opx_plus). An OPX1000 can drive an Octave, so the
                          #   chassis is the wrong thing to branch on. Unknown reports as
                          #   None and is never promoted to a family
+  _mw_fem.py             # what an MW-FEM port IS: the band table, the port-pair rule,
+                         #   the 250 MHz IF convention, and the port's LO in EITHER
+                         #   spelling (upconverter_frequency, or the upconverters dict
+                         #   once a channel is adopted - qm-qua refuses both). Nothing
+                         #   reads the scalar directly: port_los/port_lo/set_port_lo
   _octave.py             # what an Octave IS: the LO grid, the +/-400 MHz IF window, the
                          #   DAC ceiling, the SHARED synthesizers (synth2 drives RF2+RF3
                          #   from one source - no MW-FEM analogue). Facts only; the policy
                          #   built on them is backend/_power.py. Package root because
                          #   experiments/ cannot import from backend/ without cycling
   quam_fields.py         # the single neutral-field <-> QUAM mapping + whole-tree audits
+  quam_io.py             # THE DOOR to a QUAM tree on disk: load_state(path) /
+                         #   save_state(machine, path). Both NAME the folder, and the
+                         #   save states include_defaults, so neither reads
+                         #   QUAM_STATE_PATH or ~/.qualibrate (issue #38); the lab root
+                         #   pins include_defaults on its serialiser too, for the bare
+                         #   saves inside quam_builder's own builders. AST-scan enforced
+                         #   (tests/test_quam_io_door.py), which also carries the two
+                         #   build scripts allowed a bare load and the census of
+                         #   non-QUAM .save() receivers
+  _vendored/             # third-party code COPIED in, licence + upstream commit beside
+                         #   it: qualibration_libs' BatchableList + XarrayDataFetcher.
+                         #   Vendored rather than depended on because that
+                         #   DISTRIBUTION requires qualibrate, which is how a GUI
+                         #   stack (fastapi, uvicorn, sqlalchemy, psycopg2) reached
+                         #   every QM environment. Byte-identical to upstream bar the
+                         #   intra-package import - fix behaviour in scqo_qm/, never here
   components/            # lab pulse shapes + macros (FlatTopCosinePulse, ISwapImplementation,
                          #   ParametricReset - PERSISTED as __class__ in state.json: moving or
                          #   renaming them requires scripts/migrate_state_scqo_qm.py-style care)
   quam_builder/          # lab QUAM classes (MixedTransmonQuam root, Thermalizing* transmons -
-                         #   ALSO persisted as __class__ in state.json)
+                         #   ALSO persisted as __class__ in state.json). The root carries
+                         #   borrowed_channels {<scqo address>: MWChannel}, written only by
+                         #   adopt-channel and dropped from to_dict() while empty, so a
+                         #   tree that adopts nothing saves exactly as before
 quam_config/             # QUAM class entrypoint (my_quam.py: Quam(MixedTransmonQuam)) + the
                          #   register_* scripts that materialize lab operations into a state
 quam_state/              # serialized instrument config (state.json/wiring.json; gitignored);
                          #   every scqo run snapshots the IN-MEMORY tree the same way
                          #   (QMBackend.vendor_config_snapshot -> <device>/setup_snapshots/)
-calibrations/            # OFFICIAL vendored nodes only + exclude/ (frozen archive)
-                         #   + offline_graph/ (manual LCH_graph_* post-processing scripts)
-calibration_utils/       # vendored official support code (regenerate via sync_official.py)
-customized/              # FROZEN RUMP of the retired qualibrate era: node/ packages the
-                         #   exclude/ archive imports + common_parameters + read_data.
-                         #   Never edit; never import from live code.
 scripts/                 # check_real_config.py, migrate_state_scqo_qm.py (the package-rename
                          #   state migration), migrate_root_class.py, migrate_thermalizing_*.py
 ```
@@ -137,14 +202,15 @@ scripts/                 # check_real_config.py, migrate_state_scqo_qm.py (the p
    `acquire()` and returns the 3-tuple `(prog, sweep_axes, acquire)` — the CALLABLE.
 2. `@register` the class and add its import line in `scqo_qm/experiments/__init__.py`
    (manual — `tests/test_experiment_registration.py` refuses a module missing its line).
-3. Read device state through the CHANNEL views (`self.device.channel(target, "readout")...`);
+3. Read device state through the CHANNEL views (`self.device.channel(target, "readout")...`)
+   and a flux line's bias through `self.device.flux_line(target)` (or `flux_anchor_v`);
    vendor-only bits come from `_vendor.vendor_element(...)`. Shared guards: `_flux_limits`,
    `_amp_limits`, `_reset.check_reset_method`.
 4. May import qm.qua (module-level star-import is the DSL's requirement), quam, qualang_tools,
-   `qualibration_libs.core`/`.data`, scqo; NEVER qualibrate, never scqat.
+   `scqo_qm._vendored.qualibration_libs`, scqo; NEVER `qualibrate` or the installed
+   `qualibration_libs` (neither is a dependency any more), never scqat.
 5. Census literals that react to a new experiment: `tests/test_preview.py` `SELF_ACQUIRING`
    (probe_self_acquires shells), `tests/test_reset_method.py` `CARRIERS` (active-reset opt-in).
-A qualibrate node is NOT part of adding an experiment (the GUI serves official nodes only).
 
 ## Physics + backend invariants (verified against the working tree)
 
@@ -185,12 +251,26 @@ is silent in both directions. Couplers name their points `off`/`on` but their at
 RF while `drive_freq_hz` reads f_01; fix by editing state.json, since `scqo set` goes through the
 same factory) — run once from `scqo_backend.py`.
 
-**Flux-amplitude sweeps: absolute volts or prefactor.** Both pair swap experiments take
-`amp_mode="absolute"|"prefactor"` (+ `flux_role`). scqo drives them `"absolute"` (the swept
-values ARE the emitted volts). Prefactor mode needs `freq_vs_flux_01_quad_term` (7 of 9 live
-chipA pairs have it unset — refused naming the field). The chevron's two QUA branches (baked
+**Flux-amplitude sweeps are ABSOLUTE VOLTS.** Both pair swap experiments sweep the emitted
+volts (+ `flux_role`); the unitless `amp_mode="prefactor"` alternative left with qualibrate,
+and with it the `freq_vs_flux_01_quad_term` dependency that 7 of 9 live chipA pairs could not
+satisfy (last release carrying it: v3.13.0). The chevron's two QUA branches (baked
 below 17 ns, stretched `const` above) must emit the same volts — `resolve_amplitudes` is pure and
 pinned by `tests/test_pair_swap_probes.py`. The partial-swap workflow is SCQO TUTORIAL §12.
+
+**`readout_time_of_flight` BORROWS the field it measures.** It is the only probe here that
+records a RAW ADC trace (`declare_stream(adc_trace=True)`), and the acquisition window is
+opened by `resonator.time_of_flight` — the very number under test. So the probe writes that
+field to the frame the neutral experiment resolved (the 28 ns floor by default, as the retired
+01a/01b nodes did) and restores it in a `finally`. A miss leaves the setup carrying a delay
+chosen to be WRONG, which is worse than the mis-set value the operator ran this to repair;
+`tests/test_readout_time_of_flight.py` pins the restore on the error path too. Two more
+things there are load-bearing: `reset_if_phase` per shot (the trace is AVERAGED, and a
+free-running phase averages the step away — the fit then reports `arrival_unresolved` on a
+healthy setup), and `reduce_raw`, which converts the 12-bit counts to volts as `-adc / 2**12`
+(the input is inverting) under the contract's `I`/`Q` names. One target at a time: two
+resonators on one feedline share an input port, so a multiplexed raw capture would record
+both pulses superposed on one trace.
 
 **Readout output at the scqo boundary** (the readout schema — SCQO TUTORIAL §11): shot axis
 `shot_idx`; per-shot discriminated data stays `state` (integer LEVELS); FPGA-averaged
@@ -205,7 +285,10 @@ Heterogeneous streams → each module defines its OWN `acquire()` and `probe()` 
 `(prog, sweep_axes, acquire)` — **the callable** (the backend unpacks it directly; same contract
 as `qubit_tomography`). ms→cycles conversions MUST use `Cast.mul_int_by_fixed` (the fixed product
 wraps modulo 16 — pinned by `tests/test_t1_tracking_shells.py`). Both refuse a missing readout
-threshold, the Bayesian one a missing confusion matrix, BY NAME before any QUA is built.
+threshold, the Bayesian one unmeasured readout fidelities, BY NAME before any QUA is built: its
+SPAM terms are `alpha = 1 - fidelity_e` / `beta = 1 - fidelity_g`, read from the scqo readout
+channel (`single_shot_readout` stores both) and passed to the builder as numbers — QUAM's own
+`confusion_matrix` is no longer read by anything here.
 
 **Active reset** (`reset_method="active"`) lives in `scqo_qm/experiments/_reset.py`, the ONE door
 (`check_reset_method`), with `QMBackend.acquire` re-checking before `probe()`. Opt-in is per
@@ -238,16 +321,16 @@ physical.json as truth; QUAM's stored measured artifacts (confusion_matrix, gate
 are dead to SCQO.
 
 ### State authority (`state_sync` rule)
-scqo's `RecordingDevice` owns its own state JSON; the QUAM tree is the vendor store. The LCH
-qualibrate writers are RETIRED, but official nodes run through the GUI can still write QUAM, so
-**QM sessions keep `state_sync="pull"`** (the vendor wins at startup; scqo pushes only what it
-freshly measures — `scqo_qm/scqo_backend.py` enforces this before any QUAM state is loaded).
-`"push"` is additionally refused for EVERY hardware backend by scqo's `make_session` (temporary,
-core-side; only the built-in simulated backend runs push), so this guard is the QUAM-specific
-second line — flipping a device to `"push"` later needs both lifted. **Which QUAM state loads** is decided by the device's cooldown
-setup alone (`<device>/<cycle>/<name>/backend_config/` holding canonical `state.json` +
-`wiring.json`); keep qualibrate's own `[quam] state_path` pointed at the same folder on machines
-running both stacks. Every run additionally records a **setup snapshot** of the tree it executed
+scqo's `RecordingDevice` owns its own state JSON; the QUAM tree is the vendor store. **QM
+sessions keep `state_sync="pull"`** (the vendor wins at startup; scqo pushes only what it
+freshly measures). There is no backend-local guard any more: this driver used to carry a second
+one whose reason was "qualibrate nodes can still write QUAM", and it left with them. The ONE
+refusal is scqo's `make_session`, which refuses `"push"` for every hardware backend (temporary,
+core-side; only the built-in simulated backend runs push) for a reason that is still live — a
+push seeds the vendor config from `scqo_state.json` with no history rows and would clobber hand
+edits of it. SCQO BACKLOG F7 is when that lifts. **Which QUAM state loads** is decided by the
+device's cooldown setup alone (`<device>/<cycle>/<name>/backend_config/` holding canonical
+`state.json` + `wiring.json`). Every run additionally records a **setup snapshot** of the tree it executed
 against (`QMBackend.vendor_config_snapshot`: the in-memory `to_dict()` split exactly as
 `machine.save()` splits it, stored content-addressed under `<device>/setup_snapshots/`);
 `scqo restore` rebuilds one as a new setup, and the manifest's `versions` is what makes the
@@ -257,39 +340,33 @@ up as `setup_snapshot.drift` in the run record (and a RuntimeWarning).
 ### scqo student surface
 Students use the **`scqo` command** from any directory in `.venv-qm`
 (`scqo user --device <name> [--setup <name>]`; `scqo run <name>` is the one way to run an
-experiment — never add per-command wrappers). `simulated` is the practice mode. The qualibrate GUI
-(`qm.bat`) serves the OFFICIAL vendored nodes only.
+experiment — never add per-command wrappers). `simulated` is the practice mode. Vendor tools
+(cluster, close-qm, calibrate-octave, apply-distortion, ...) are `scqo-qm <command>`; there is
+no GUI.
 
 ## Key Entrypoints
 - `quam_config/my_quam.py` → `class Quam(MixedTransmonQuam)` — the QUAM class every path loads.
   The root class + the lab transmon/pulse/macro classes are PERSISTED by dotted path in
   state.json (`scqo_qm.*` since the v1 restructure): re-check `__class__` after any QUAM save,
   and gate config edits offline with `m.generate_config()` under `warnings.simplefilter("error")`.
-- `scripts/migrate_state_scqo_qm.py` → the `customized.*` → `scqo_qm.*` state migration with
-  positive verification (QUAM silently falls back to base classes on a missing import — never
-  trust absence-of-error).
 
 ## Operational Notes (verified against the working tree)
-- **Official code is VENDORED (copied), and committed.** `calibrations/<name>.py` +
-  `calibration_utils/<name>/` come from `sync_official.py` (`calibration_links.toml`;
-  `official_sync.json` records the vendored upstream commit). Do not edit vendored files in place.
-  Updating (~every 2 months): pull `qua-libs_official` → `python sync_official.py` → review diff →
-  commit. `customized/`'s frozen archive and `scqo_qm/` are never touched by the sync.
-- **`calibrations/offline_graph/`** holds manual `LCH_graph_*.py` post-processing scripts
-  (editable lab code; qualibrate does not list them).
+- **Third-party code is VENDORED (copied), and committed** — now only in
+  `scqo_qm/_vendored/`, with its licence and upstream commit beside it and its contract pinned
+  by `tests/test_lib_fetcher.py`. Do not edit it in place; update upstream and re-copy.
 - **Environments:** the scqo path runs in the shared `.venv-qm` (rebuildable from
   `requirements-qm.lock.txt`); siblings `.venv-view` (no instrument libs) and `.venv-qblox`.
-  Full rule for all four repos: [ENVIRONMENTS.md](ENVIRONMENTS.md). `qm.bat` activates `.venv-qm` and runs `qualibrate start` (GUI).
+  Full rule for all four repos: [ENVIRONMENTS.md](ENVIRONMENTS.md).
 - **qm logging vs the CLI JSON contract:** fused experiment modules import `qm.qua` at module
   level (the DSL star-import cannot be function-local), and qm's import-time logger writes to
   STDOUT by default — `scqo_qm/experiments/__init__.py` flips qm's own
   `QM_DISABLE_STREAMOUTPUT` switch and re-homes the records on stderr BEFORE the first qm import.
   Machines without the QM stack: scqo's entry-point discovery skips this driver gracefully.
-- **Packaging:** dist `scqo-qm`; wheel packages `calibrations`, `calibration_utils`,
-  `quam_config`, `customized` (frozen archive travels for exclude/ importability), `scqo_qm`.
+- **Packaging:** dist `scqo-qm`; wheel packages `quam_config` and `scqo_qm`.
   Entry points: `scqo.experiments` → `scqo_qm.experiments`; `scqo.backends` →
-  `qm = scqo_qm.scqo_backend:build_backend`. Entry points register at INSTALL time — re-run
-  `uv pip install -e` after changing them. Python `>=3.10,<3.13`, black `line-length = 120`.
+  `qm = scqo_qm.scqo_backend:build_backend`; console script `scqo-qm = scqo_qm.cli:main`.
+  Entry points and scripts register at INSTALL time — re-run `uv pip install -e` after
+  changing them. Python `>=3.10,<3.13`, black `line-length = 120`.
 
 ## Tests
 
@@ -304,11 +381,14 @@ every commit.
 
 **There is no repo-local venv for this repo.** A `scqo-qm/.venv` on disk is residue of a stray
 `uv run`: it resolves from `pyproject.toml` rather than the lockfile, and on this machine
-(checked 2026-09-04) it holds no `qm`, no `quam`, no `qualibrate` and no `scqat`, with `scqo`
+(checked 2026-09-04) it holds no `qm`, no `quam` and no `scqat`, with `scqo`
 frozen at 2.3.0. Do not test in it. The v3.0.0 release notes already recorded it failing to
 collect for want of `typing_extensions`, and every recent cut was validated with the shared venv. No test count is quoted here on purpose - see the `OFFLINE-VALIDATED` line in the
 matching RELEASES.toml block for what each release actually ran. Live-state tests load the repo-relative `quam_state/` (hermetic — no
-`~/.qualibrate` dependency).
+`~/.qualibrate` dependency). Loading never needed it; SAVING did until issue #38, and a
+load-only test cannot see that - `test_quam_save_hermetic.py` builds, loads and saves a
+tree with the config hidden (`QUAM_CONFIG_FILE` at a missing file, never `HOME`:
+qualibrate_config computes its path once, at import).
 
 | File | Covers | Needs QM stack? |
 |---|---|---|
@@ -319,15 +399,25 @@ matching RELEASES.toml block for what each release actually ran. Live-state test
 | `test_preview.py` | the probe_self_acquires census + preview refusal ordering | no |
 | `test_qc_populations.py`, `test_pair_swap_probes.py`, `test_parity_switch_shell.py`, `test_t1_tracking_shells.py`, `test_ramsey_cryoscope_probe.py`, `test_spectroscopy_cryoscope_probe.py` | pure builder math, param mapping, AST properties of the fused modules | no |
 | `test_mixed_quam.py`, `test_distortion.py`, `test_apply_distortion.py` | the lab QUAM root + distortion arithmetic | partly |
+| `test_quam_save_hermetic.py` | issue #38: build (quam_builder's own saves included), load and save a tree with no qualibrate config; the save lands in the LOAD folder even when `QUAM_STATE_PATH` has moved | yes |
+| `test_quam_io_door.py` | the AST scan: no bare `Quam.load()`, and every QUAM `save()` states `include_defaults` — with the build-script exceptions and the non-QUAM `.save()` census as literals | no |
+| `test_lib_fetcher.py` | the contract `_lib` takes from the vendored `qualibration-libs` pieces: both batching shapes, the fetcher's dataset, its scalar handles and `t_start` | no |
 | `test_close_qm.py` | the best-effort cluster-cleanup hook + its operator CLI (doubles, no cluster) | yes |
+| `test_cluster.py` | the read-only `scqo-qm cluster` query: QOP 3.x rows + the QOP 2.x fallback, never a close/halt, an unreadable QM never reads as idle (doubles, no cluster) | yes |
+| `test_cli.py` | the `scqo-qm` dispatcher: every OPERATOR_COMMANDS entry reachable under its subcommand, the console script declared | yes |
+| `test_register_partial_swap.py` | the partial-swap operator CLI on a COPY of the live quam_state: the three entries land and nothing else moves; every refusal (name contract, clipping amplitude, an edit that landed on disk after loading) leaves the folder untouched | yes |
+| `test_adopt_channel.py` | the adopt-channel operator CLI on a COPY of the live quam_state: one element on upconverter 2, only the port pair's band/LO form moves, the line qubit keeps its IF, the borrowed view serves it; every refusal leaves the folder untouched | yes |
+| `test_coupler_power_rabi_probe.py` | `qubit_power_rabi` on an adopted coupler: drive on the borrowed element, then the map (selective pi, x180) and the member's readout, in that order on generated QUA; drive_line alone; power_context; the coupler tone and broadband on a two-upconverter port | yes |
+| `test_mw_fem.py` | `_mw_fem`: both LO spellings, the port-pair rule, no retune may create an upconverter | no |
 | `test_experiment_surface.py` | `_vendor.py` — the one door out of the neutral surface | yes |
 | `test_qm_backend.py` | entity surface on the stub; builder-vs-class mapping equivalence, baked-config self-acquisition, active-reset + tracker builds on the LIVE quam_state; preview; `vendor_config_snapshot` (pure split, stub degrade, live-state parsed equality) | yes |
 | `test_sequential_probe.py` | the BACKEND-PARITY half: qubit_spectroscopy's drive/readout timing in both `readout_overlap` modes, asserted on generated QUA (quote-agnostic vs qm versions) | yes |
+| `test_resonator_stark_probe.py` | the BACKEND-PARITY half for qubit_resonator_stark: the Stark tone (the readout op, `amp()`-scaled) rings up before the drive and ends with it, the unscaled measure waits one depletion; the QUAM 16 ns factory-depletion refusal; one target at a time — on generated QUA | yes |
 | `test_scqo_glue.py` | the `scqo` CLI works in THIS venv + the qm factory (slowest) | yes |
 | `test_check_real_config.py` | `scripts/check_real_config.py` end-to-end to its PASS line on the live quam_state (subprocess, ~14 s — exit code + final line asserted, never a pipeline fragment) | yes |
 
 ## Workspace Packages (Read-Only)
-The vendor stack (`qm` → `quam` → `quam_builder` → `qualibrate`) is available read-only; do NOT
+The vendor stack (`qm` → `quam` → `quam_builder`) is available read-only; do NOT
 The sibling repos are [SCQO](https://github.com/shiau109/SCQO) (the vendor-neutral core, a hard dependency resolved as `../SCQO`), [scqat](https://github.com/shiau109/scqat) (analysis) and [scqo-qblox](https://github.com/shiau109/scqo-qblox) (the Qblox backend - never import from it).
 
 ## Rules for the AI assistant
@@ -337,16 +427,18 @@ Rules 1–5 are about **what may be edited** and hold everywhere, forks included
 installs, sometimes a running hardware session). In your own fork it does not apply — work on a
 feature branch and open a PR, as [AGENTS.md](AGENTS.md) describes.
 
-1. **Do NOT edit vendored official files** (`calibrations/` non-graph files, `calibration_utils/`).
-   Change behavior in `scqo_qm/` instead, or update upstream and re-sync.
-2. **Editable code lives in:** `scqo_qm/`, `quam_config/`, `scripts/`,
-   `calibrations/offline_graph/`. Everything else is vendored, generated, or frozen.
-3. **Never touch the frozen archive** (`customized/`, `calibrations/exclude/`) — it exists for
-   history, not for running. It *is* packaged (`pyproject.toml` ships it so `exclude/` stays
-   importable), which is not permission to edit it.
+1. **Do NOT edit `scqo_qm/_vendored/`.** It is third-party code copied in byte-identical
+   (bar the one import line a moved file needs), with its licence and upstream commit beside
+   it and its contract pinned by `tests/test_lib_fetcher.py`. Change behavior in `scqo_qm/`
+   instead, or update upstream and re-copy.
+2. **Editable code lives in:** `scqo_qm/` (except `_vendored/`), `quam_config/`, `scripts/`.
+3. **The frozen qualibrate archive is GONE** — `calibrations/`, `calibration_utils/` and
+   `customized/` were deleted after v3.13.0, which is the tag that still carries them. Read
+   them there or in git history; do not restore them into the tree.
 4. **Skip `data/`** — data storage only, and gitignored, so a fresh clone has none.
 5. **No qualibrate nodes.** New experiments are fused files in `scqo_qm/experiments/`
-   (**Adding an experiment**); qualibrate scaffolding returns only on explicit request.
+   (**Adding an experiment**); qualibrate is not a dependency and scaffolding for it returns
+   only on explicit request.
 6. **In the maintainer's tree only:** present a plan and get the maintainer's approval before
    modifying code, call out any critical vendor dependency you add or change, and report
    working-tree/instruction conflicts before changing anything. Several agents share that tree
