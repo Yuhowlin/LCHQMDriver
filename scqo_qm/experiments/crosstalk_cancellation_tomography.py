@@ -221,7 +221,10 @@ class CrosstalkCancellationTomography(_CoreTomography):
         return self._patch(copy.deepcopy(config), probe_qubit, drive_qubit)
 
     def _program_kwargs(self, probe_qubit, drive_qubit) -> dict:
-        reset_type = getattr(self.params, "reset_method", None) or getattr(self.params, "reset_type", "thermal")
+        from ._reset import check_reset_method
+
+        # the helper refuses a reset this program cannot honour instead of thermalizing silently
+        reset_type = check_reset_method(self, qubits=[probe_qubit.name, drive_qubit.name])
         return dict(
             target_gate=self.params.target_gate,
             cancel_amp=float(self.params.cancel_amp),
