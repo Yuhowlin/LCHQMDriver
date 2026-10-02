@@ -24,7 +24,6 @@ if not any(getattr(_h, "stream", None) is _sys.stderr for _h in _qm_logger.handl
     _qm_logger.setLevel(_logging.INFO)
 
 from . import crosstalk_compensated_sqrb  # noqa: F401  (import side effect: @register)
-from . import crosstalk_compensated_benchmark  # noqa: F401  (import side effect: @register)
 from . import crosstalk_cancellation_tomography  # noqa: F401  (import side effect: @register)
 from . import pair_swap_chevron  # noqa: F401  (import side effect: @register)
 from . import pair_swap_angle  # noqa: F401  (import side effect: @register)
