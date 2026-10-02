@@ -11,9 +11,14 @@ How it runs (each choice was measured on chipQM hardware, 2026-10-01):
   its own loop variable. Those loops run in parallel from a common align and play 48 ns
   Cliffords back to back (timestamp_stream). One shared loop with a switch_ per element took
   160 ns per Clifford; a computed index (gates[k + 1]) ~116 ns.
-* The cancel element sits on the victim's line at the AGGRESSOR's frequency and plays a scaled,
-  phase-shifted copy of the aggressor's pulses - a copy of the leaked field itself, so it needs
-  no per-pulse frame steps and also removes the leak's AC-Stark shift.
+* The cancel element sits on the victim's line and plays a scaled, phase-shifted copy of the
+  aggressor's pulses. cancel_tone='aggressor' (default) outputs it at the AGGRESSOR's frequency -
+  a copy of the leaked field itself, so it needs no frame steps. cancel_tone='victim' outputs it
+  at the victim's frequency and follows the leak's phase, which advances by
+  s = (f_aggressor - f_victim) x 16 ns per subslot in the victim's frame, in steps: subslot j of
+  each composite is pre-rotated by j*s and the frame turns 3*s after every Clifford (what the
+  unrolled victim-tone program of 2026-10-01 did per subslot). Whether that frame step keeps the
+  loop gap-free is to be checked on hardware with debug_timestamps.
 * Every shot resets frames and IF phases plus reset_global_phase() (without it the phase
   between lines wanders shot to shot). Reading a qubit shifts its xy phase by one 4 ns IF cycle
   relative to other FEM cores, so cancel parameters are calibrated by
@@ -106,6 +111,20 @@ COMPOSITE_PREFIX = "clif"
 MAX_ARRAY_GATES = 16000
 
 CONDITIONS = ("isolated", "simultaneous", "compensated")
+
+CANCEL_TONES = ("aggressor", "victim")
+
+
+def subslot_phase_step(victim_qubit, aggressor_qubit) -> float:
+    """Leak phase advance per 16 ns subslot in the victim's frame, turns in (-0.5, 0.5].
+
+    (f_aggressor - f_victim) x the aggressor's x180 length: what a victim-tone cancel element
+    turns its frame by per subslot (a frame turn of t multiplies the pulse's I+jQ by e^{j 2 pi t}).
+    """
+    length_ns = float(aggressor_qubit.xy.operations["x180"].length)
+    turns = (float(aggressor_qubit.xy.RF_frequency) - float(victim_qubit.xy.RF_frequency)) * length_ns * 1e-9
+    turns = turns % 1.0
+    return turns - 1.0 if turns > 0.5 else turns
 
 
 # --------------------------------------------------------------------------- sequences
@@ -216,6 +235,7 @@ def build_program(
     bidirectional: bool = False,
     drive_cancel_amp: float = 0.0,
     drive_init_phase: float = 0.0,
+    cancel_tone: str = "aggressor",
     reset_type: str = "thermal",
     use_state_discrimination: bool = False,
     seed: int | None = None,
@@ -227,8 +247,11 @@ def build_program(
     Loops: condition (Python) > sequence > depth > shot > pass. Streams I{n}/Q{n} (or state{n})
     per read qubit, averaged over shots and shaped (condition, sequence, depth). With
     debug_timestamps every element's loop is bracketed by zero-amplitude markers with
-    timestamp_stream (ts0_/ts1_<pass>_<element>, 4 ns cycles).
+    timestamp_stream (ts0_/ts1_<pass>_<element>, 4 ns cycles). cancel_tone must match the
+    config (patch_config); 'victim' adds the per-Clifford frame step on the cancel elements.
     """
+    if cancel_tone not in CANCEL_TONES:
+        raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
     depth_arr = np.asarray(depths, dtype=int)
     if depth_arr.min() < 1:
         raise ValueError("depths must be >= 1")
@@ -240,6 +263,12 @@ def build_program(
     reverse_cancel_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
     xy_elems = [probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem] + ([reverse_cancel_elem] if bidirectional else [])
     read_qubits = [probe_qubit, drive_qubit] if bidirectional else [probe_qubit]
+    # victim tone: frame turn per Clifford (3 subslots) on each cancel element
+    clifford_step = {}
+    if cancel_tone == "victim":
+        clifford_step[cancel_elem] = 3.0 * subslot_phase_step(probe_qubit, drive_qubit)
+        if reverse_cancel_elem is not None:
+            clifford_step[reverse_cancel_elem] = 3.0 * subslot_phase_step(drive_qubit, probe_qubit)
     elem_kw = dict(
         probe_qubit=probe_qubit, drive_qubit=drive_qubit, cancel_elem=cancel_elem,
         reverse_cancel_elem=reverse_cancel_elem, cancel_amp=float(cancel_amp),
@@ -303,8 +332,11 @@ def build_program(
                             for idx, (element, src, scale) in enumerate(elements):
                                 kk = seqs["k_el"][idx]
                                 gates = seqs[f"gates_{src}"]
+                                step = clifford_step.get(element, 0.0)
                                 with for_(kk, base, kk < k_stop, kk + 1):
                                     _play_composite(gates[kk], element, scale)
+                                    if step:
+                                        frame_rotation_2pi(step, element)
                                 _play_composite(seqs[f"g_inv_{src}"], element, scale)
                                 if debug_timestamps:
                                     play("x180" * amp(0.0), element, timestamp_stream=f"ts1_{play_cond}_{element}")
@@ -367,15 +399,18 @@ def sequence_chunks(num_sequences: int, max_depth: int, per_program: int) -> lis
 # --------------------------------------------------------------------------- config
 
 
-def _patch_cancel_element(config: dict, victim_qubit: Any, aggressor_qubit: Any) -> dict:
-    """Add `<victim xy>_cancel`: the victim's line, the aggressor's frequency and pulses, a free core.
+def _patch_cancel_element(config: dict, victim_qubit: Any, aggressor_qubit: Any, *, tone: str = "aggressor") -> dict:
+    """Add `<victim xy>_cancel`: the victim's line, the aggressor's pulses, a free core.
 
     The element is a copy of the victim's xy element (same port) whose ops point at the
-    AGGRESSOR's pulses and whose IF is moved by (f_aggressor - f_victim), so it outputs a copy
-    of the aggressor's drive at the aggressor's frequency on the victim's line. Elements on one
+    AGGRESSOR's pulses. tone='aggressor' moves its IF by (f_aggressor - f_victim), so it outputs a
+    copy of the aggressor's drive at the aggressor's frequency on the victim's line; tone='victim'
+    keeps the victim's IF (the program then follows the leak's phase by frame steps). Elements on one
     core cannot play at the same time, so it takes the next unused core on the FEM; the phase
     reference is per core, which is why callers create cancel elements in a fixed order.
     """
+    if tone not in CANCEL_TONES:
+        raise ValueError(f"unknown cancel tone {tone!r}")
     cancel_elem_name = f"{victim_qubit.xy.name}_cancel"
     if cancel_elem_name in config.get("elements", {}):
         return config
@@ -413,14 +448,15 @@ def _patch_cancel_element(config: dict, victim_qubit: Any, aggressor_qubit: Any)
         if "thread" in elem_dict:
             elem_dict["thread"] = new_core
 
-    shift = float(aggressor_qubit.xy.RF_frequency) - float(victim_qubit.xy.RF_frequency)
-    new_if = float(elem_dict["intermediate_frequency"]) + shift
-    if abs(new_if) > 400e6:
-        raise ValueError(
-            f"the cancel element needs IF {new_if / 1e6:.1f} MHz on {victim_qubit.xy.name}'s line, "
-            "outside the MW-FEM +-400 MHz band"
-        )
-    elem_dict["intermediate_frequency"] = new_if
+    if tone == "aggressor":
+        shift = float(aggressor_qubit.xy.RF_frequency) - float(victim_qubit.xy.RF_frequency)
+        new_if = float(elem_dict["intermediate_frequency"]) + shift
+        if abs(new_if) > 400e6:
+            raise ValueError(
+                f"the cancel element needs IF {new_if / 1e6:.1f} MHz on {victim_qubit.xy.name}'s line, "
+                "outside the MW-FEM +-400 MHz band"
+            )
+        elem_dict["intermediate_frequency"] = new_if
     config["elements"][cancel_elem_name] = elem_dict
     return config
 
@@ -438,11 +474,15 @@ def _op_iq(config: dict, element: str, op: str) -> np.ndarray:
     return parts[0] + 1j * parts[1]
 
 
-def _patch_composite_cliffords(config: dict, element: str, source_element: str | None = None) -> dict:
+def _patch_composite_cliffords(
+    config: dict, element: str, source_element: str | None = None, subslot_step: float = 0.0
+) -> dict:
     """Add ops clif0..clif23 to `element`: each Clifford's 3 subslots as ONE waveform.
 
     Subslot j holds source_element's pulse for CLIFFORD_3SUBSLOTS[g][j] (zeros when idle). A
     cancel element passes the aggressor's xy element as source (played * amp(cancel_amp)).
+    subslot_step (turns) pre-rotates subslot j by j*subslot_step: a victim-tone cancel element's
+    frame steps within one Clifford, baked into the waveform.
     """
     source_element = source_element or element
     pulse_len = len(_op_iq(config, source_element, "x180"))
@@ -453,7 +493,7 @@ def _patch_composite_cliffords(config: dict, element: str, source_element: str |
         ]
         if any(len(p) != pulse_len for p in parts):
             raise ValueError(f"{source_element}: Clifford subslot pulses differ in length")
-        z = np.concatenate(parts)
+        z = np.concatenate([p * np.exp(2j * np.pi * k * subslot_step) for k, p in enumerate(parts)])
         name = f"{element}.{COMPOSITE_PREFIX}{g}"
         config["waveforms"][f"{name}.wf.I"] = {"type": "arbitrary", "samples": z.real.tolist()}
         config["waveforms"][f"{name}.wf.Q"] = {"type": "arbitrary", "samples": z.imag.tolist()}
@@ -466,7 +506,7 @@ def _patch_composite_cliffords(config: dict, element: str, source_element: str |
     return config
 
 
-def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool) -> dict:
+def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool, cancel_tone: str = "aggressor") -> dict:
     """Cancel element(s) and composite Clifford ops for build_program.
 
     Cancel elements are created in victim-name order (the phase reference is per FEM core, and
@@ -475,12 +515,12 @@ def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool)
     """
     pairs = [(probe_qubit, drive_qubit)] + ([(drive_qubit, probe_qubit)] if bidirectional else [])
     for victim, aggressor in sorted(pairs, key=lambda p: p[0].xy.name):
-        config = _patch_cancel_element(config, victim, aggressor)
+        config = _patch_cancel_element(config, victim, aggressor, tone=cancel_tone)
     config = _patch_composite_cliffords(config, probe_qubit.xy.name)
     config = _patch_composite_cliffords(config, drive_qubit.xy.name)
-    config = _patch_composite_cliffords(config, f"{probe_qubit.xy.name}_cancel", drive_qubit.xy.name)
-    if bidirectional:
-        config = _patch_composite_cliffords(config, f"{drive_qubit.xy.name}_cancel", probe_qubit.xy.name)
+    for victim, aggressor in pairs:
+        step = subslot_phase_step(victim, aggressor) if cancel_tone == "victim" else 0.0
+        config = _patch_composite_cliffords(config, f"{victim.xy.name}_cancel", aggressor.xy.name, step)
     return config
 
 
@@ -501,7 +541,10 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         return q_dict.get(probe_name, qubits[0]), q_dict.get(drive_name, qubits[1])
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
-        return patch_config(config, probe_qubit, drive_qubit, bidirectional=bool(self.params.bidirectional))
+        return patch_config(
+            config, probe_qubit, drive_qubit, bidirectional=bool(self.params.bidirectional),
+            cancel_tone=self.params.cancel_tone,
+        )
 
     def patch_preview_config(self, config: dict) -> dict:
         """Patch the cancellation element(s) and composite ops into the generated config for preview."""
@@ -518,6 +561,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             bidirectional=bool(self.params.bidirectional),
             drive_cancel_amp=float(self.params.drive_cancel_amp),
             drive_init_phase=float(self.params.drive_init_phase),
+            cancel_tone=self.params.cancel_tone,
             reset_type=check_reset_method(self),
             use_state_discrimination=bool(self.params.use_state_discrimination),
             seed=self.params.seed,

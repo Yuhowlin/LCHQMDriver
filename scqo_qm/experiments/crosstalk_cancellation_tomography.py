@@ -9,9 +9,10 @@ probe qubit's Bloch trajectory under N repetitions of target_gate in three condi
 3. 'compensated': both together.
 
 The leaked field is at the drive's frequency, so in the probe's frame its phase advances by
-sub_p = (f_drive - f_probe) * pulse length every pulse. The drive and the cancel element both
-turn their frame by -sub_p per pulse, which holds the leak's (and the cancel's) rotation axis
-still so each trajectory is a fixed rotation per pulse.
+sub_p = (f_drive - f_probe) * pulse length every pulse. The drive turns its frame by -sub_p per
+pulse, which holds the leak's rotation axis still so each trajectory is a fixed rotation per
+pulse. An aggressor-tone cancel element turns with it; a victim-tone one (cancel_tone='victim')
+is at the probe's frequency and already still.
 
 The cancel elements are built exactly as crosstalk_compensated_sqrb builds them (same tone,
 same core order), so the fitted cancel_amp / init_phase carry over to the benchmark when the
@@ -53,13 +54,19 @@ def build_program(
     simulate: bool = False,
     bidirectional: bool = False,
     read_drive: bool = False,
+    cancel_tone: str = "aggressor",
 ):
     """Build the QUA program for Crosstalk Cancellation Tomography.
 
     bidirectional: the drive-line cancel element is in the program too, idle (as in the
     bidirectional benchmark while only the drive's leak is measured). read_drive: the drive
     qubit is read in the same shot as the probe (its data is not returned).
+    cancel_tone must match the config: an aggressor-tone copy turns with the drive's frame; a
+    victim-tone copy is already still in the probe's frame and takes no steps.
     """
+    if cancel_tone not in ("aggressor", "victim"):
+        raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
+    cancel_step = -float(sub_phase_rate_turns) if cancel_tone == "aggressor" else 0.0
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
     reverse_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
     elems = [probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem] + ([reverse_elem] if reverse_elem else [])
@@ -129,7 +136,8 @@ def build_program(
                                     if sub_p != 0.0:
                                         # hold the leak's (and the copy's) axis still in the probe frame
                                         frame_rotation_2pi(-sub_p, drive_qubit.xy.name)
-                                        frame_rotation_2pi(-sub_p, cancel_elem)
+                                        if cancel_step:
+                                            frame_rotation_2pi(cancel_step, cancel_elem)
                             else:
                                 wait(4, probe_qubit.xy.name)
 
@@ -202,7 +210,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
         """The cancel element(s), built and ordered as crosstalk_compensated_sqrb builds them."""
         pairs = [(probe_qubit, drive_qubit)] + ([(drive_qubit, probe_qubit)] if self.params.bidirectional else [])
         for victim, aggressor in sorted(pairs, key=lambda p: p[0].xy.name):
-            config = _patch_cancel_element(config, victim, aggressor)
+            config = _patch_cancel_element(config, victim, aggressor, tone=self.params.cancel_tone)
         return config
 
     def patch_preview_config(self, config: dict) -> dict:
@@ -223,6 +231,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
             simulate=getattr(self.backend, "simulate", False),
             bidirectional=bool(self.params.bidirectional),
             read_drive=bool(self.params.read_drive),
+            cancel_tone=self.params.cancel_tone,
         )
 
     def preview_program(self):

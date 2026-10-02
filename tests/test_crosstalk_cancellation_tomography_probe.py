@@ -119,6 +119,24 @@ def test_cancel_follows_the_drive_frame_with_a_global_phase_reset():
 
 def test_removed_tone_and_reset_options_are_gone():
     mach, q1, q2 = _mock_machine()
-    for kw in ({"cancel_tone": "victim"}, {"phase_reset": "if_only"}, {"drive_init_phase": 0.1}):
+    for kw in ({"phase_reset": "if_only"}, {"drive_init_phase": 0.1}):
         with pytest.raises(TypeError):
             build_program(mach, q1, q2, repetitions=[1], conditions=["compensated"], bases=["z"], num_shots=1, **kw)
+
+
+def test_victim_tone_cancel_holds_still_while_the_drive_steps():
+    import re
+    from qm import generate_qua_script
+
+    mach, q1, q2 = _mock_machine()
+    prog, _ = build_program(
+        mach, q1, q2, target_gate="x180", cancel_amp=0.035, init_phase=0.0, sub_phase_rate_turns=0.12,
+        repetitions=[3], conditions=["noise_only", "cancel_only", "compensated"], bases=["z"],
+        num_shots=1, bidirectional=True, cancel_tone="victim",
+    )
+    sc = generate_qua_script(prog).replace("'", '"')
+    assert re.findall(r'frame_rotation_2pi\(([-0-9.e]+), "q2\.xy"\)', sc).count("-0.12") == 9
+    assert -0.12 not in [float(v) for v in re.findall(r'frame_rotation_2pi\(([-0-9.e]+), "q1\.xy_cancel"\)', sc)]
+    with pytest.raises(ValueError, match="cancel_tone"):
+        build_program(mach, q1, q2, repetitions=[1], conditions=["compensated"], bases=["z"], num_shots=1,
+                      cancel_tone="drive")

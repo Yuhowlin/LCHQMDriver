@@ -22,6 +22,7 @@ from scqo_qm.experiments.crosstalk_compensated_sqrb import (
     patch_config,
     recovery_gates,
     sequence_chunks,
+    subslot_phase_step,
 )
 
 
@@ -255,6 +256,64 @@ def test_composite_cliffords_concatenate_the_three_subslots():
             cfg["waveforms"][pulse["waveforms"]["Q"]]["samples"])
         for j, slot in enumerate(subslots):
             assert np.allclose(z[j * n:(j + 1) * n], 0.0 if slot is None else shapes[slot[0]])
+
+
+# --------------------------------------------------------------------------- victim tone
+
+
+def test_subslot_phase_step_is_the_wrapped_leak_advance():
+    mach, q1, q2 = _mock_machine()
+    # (5.191 - 5.143) GHz x 16 ns = 0.768 turns -> -0.232
+    assert np.isclose(subslot_phase_step(q1, q2), 0.768 - 1.0)
+    assert np.isclose(subslot_phase_step(q2, q1), 1.0 - 0.768)
+
+
+def test_victim_tone_cancel_keeps_the_victim_frequency():
+    mach, q1, q2 = _mock_machine()
+    q2.xy.RF_frequency = 5.6e9  # an aggressor-tone IF would be out of band
+    cfg = _patch_cancel_element(_full_config(), q1, q2, tone="victim")
+    assert cfg["elements"]["q1.xy_cancel"]["intermediate_frequency"] == 243e6
+    assert cfg["elements"]["q1.xy_cancel"]["operations"]["x90"] == "q2.xy.x90.pulse"
+    with pytest.raises(ValueError, match="tone"):
+        _patch_cancel_element(_full_config(), q1, q2, tone="drive")
+
+
+def test_victim_tone_composites_carry_the_in_clifford_frame_steps():
+    """Subslot j of a victim-tone cancel composite = aggressor pulse x e^{j 2 pi j s}."""
+    mach, q1, q2 = _mock_machine()
+    agg = patch_config(_full_config(), q1, q2, bidirectional=True)
+    vic = patch_config(_full_config(), q1, q2, bidirectional=True, cancel_tone="victim")
+
+    def iq(cfg, elem, g):
+        pulse = cfg["pulses"][cfg["elements"][elem]["operations"][f"clif{g}"]]
+        return np.asarray(cfg["waveforms"][pulse["waveforms"]["I"]]["samples"]) + 1j * np.asarray(
+            cfg["waveforms"][pulse["waveforms"]["Q"]]["samples"])
+
+    g = 22  # x90, y90, x90: all three subslots played
+    for victim, aggressor in ((q1, q2), (q2, q1)):
+        elem, s = f"{victim.xy.name}_cancel", subslot_phase_step(victim, aggressor)
+        a, v = iq(agg, elem, g), iq(vic, elem, g)
+        for j in range(3):
+            assert np.allclose(v[4 * j:4 * (j + 1)], a[4 * j:4 * (j + 1)] * np.exp(2j * np.pi * j * s))
+        # the qubits' own composites are untouched
+        assert np.allclose(iq(agg, victim.xy.name, g), iq(vic, victim.xy.name, g))
+
+
+def test_victim_tone_cancel_loops_turn_the_frame_every_clifford():
+    sc = _script(_program(conditions=["compensated"], bidirectional=True, drive_cancel_amp=0.02,
+                          cancel_tone="victim")[0])
+    mach, q1, q2 = _mock_machine()
+    for victim, aggressor in ((q1, q2), (q2, q1)):
+        step = 3 * subslot_phase_step(victim, aggressor)
+        hits = re.findall(rf'frame_rotation_2pi\(([-0-9.e]+), "{victim.xy.name}_cancel"\)', sc)
+        assert any(np.isclose(float(h), step) for h in hits)
+    for elem in ("q1.xy", "q2.xy"):
+        assert not re.search(rf'frame_rotation_2pi\([^)]*"{re.escape(elem)}"\)', sc)
+    # the aggressor tone has only the initial phases
+    sc = _script(_program(conditions=["compensated"], bidirectional=True, drive_cancel_amp=0.02)[0])
+    assert len(re.findall(r'frame_rotation_2pi\([^)]*"q[12]\.xy_cancel"\)', sc)) == 2
+    with pytest.raises(ValueError, match="cancel_tone"):
+        _program(cancel_tone="drive")
 
 
 # --------------------------------------------------------------------------- experiment
