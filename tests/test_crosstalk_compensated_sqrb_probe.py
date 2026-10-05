@@ -59,9 +59,9 @@ def _recording_machine():
 
 
 def _script(prog):
-    from qm import generate_qua_script
+    from _qua_script import qua_text
 
-    return generate_qua_script(prog).replace("'", '"')
+    return qua_text(prog)
 
 
 def _program(**kw):

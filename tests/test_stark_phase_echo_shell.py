@@ -62,10 +62,7 @@ def machine_with_stark():
     if target is not None:
         _drop_stark(machine.qubits[target].xy)
 
-
 def test_build_program_renders_the_echo_stark_sequence(machine_with_stark):
-    from qm import generate_qua_script
-
     from scqo_qm.experiments._lib import select_qubits
     from scqo_qm.experiments.qubit_stark_phase_echo import build_program
 
@@ -81,7 +78,9 @@ def test_build_program_renders_the_echo_stark_sequence(machine_with_stark):
     )
     assert list(axes) == ["qubit", "stark_amp", "meas_basis"]
 
-    text = generate_qua_script(prog, machine.generate_config())
+    from _qua_script import qua_text
+
+    text = qua_text(prog, machine.generate_config())
     assert "update_frequency" in text            # the off-resonant detune/restore bracket
     assert "y90" in text                          # the -y90 closing basis
 
