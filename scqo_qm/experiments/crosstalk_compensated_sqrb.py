@@ -680,25 +680,36 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         """Run every condition, in programs of at most sequences_per_program sequences x every depth,
         all on one QM (shared_qm): the programs are unchanged, only the per-program open and close
         of the QM is gone."""
+        from concurrent.futures import ThreadPoolExecutor
+
         conditions = self.params.get_conditions()
         depths = [int(x) for x in self.params.get_depths()]
         total = int(self.params.num_random_sequences)
         chunks = sequence_chunks(total, max(depths), int(self.params.sequences_per_program))
-        cond_datasets = []
-        with shared_qm(machine, config, timeout=timeout) as qm:
-            for c_idx, cond in enumerate(conditions, 1):
-                chunk_sets = []
-                for chunk in chunks:
-                    prog, axes = build_program(
-                        machine, probe_qubit, drive_qubit, depths=depths, conditions=[cond],
-                        num_sequences=total, sequence_indices=chunk, num_shots=num_shots, **self._program_kwargs(),
+        kwargs = self._program_kwargs()
+        jobs = [(cond, chunk) for cond in conditions for chunk in chunks]
+
+        def build(job):
+            cond, chunk = job
+            return build_program(
+                machine, probe_qubit, drive_qubit, depths=depths, conditions=[cond],
+                num_sequences=total, sequence_indices=chunk, num_shots=num_shots, **kwargs,
+            )
+
+        results: dict[str, list] = {cond: [] for cond in conditions}
+        # building a program takes ~3-4 s of Python: the next one is built while this one runs
+        with ThreadPoolExecutor(max_workers=1) as pool, shared_qm(machine, config, timeout=timeout) as qm:
+            pending = pool.submit(build, jobs[0])
+            for i, (cond, chunk) in enumerate(jobs):
+                prog, axes = pending.result()
+                if i + 1 < len(jobs):
+                    pending = pool.submit(build, jobs[i + 1])
+                results[cond].append(_acquire_chunk_with_retry(
+                    machine, prog, axes, num_shots=num_shots, timeout=timeout, log=log, config=config, qm=qm
+                ))
+                if len(results[cond]) == len(chunks):
+                    print(
+                        f"# [Benchmark {conditions.index(cond) + 1}/{len(conditions)}] condition '{cond}': "
+                        f"{total} sequences x {len(depths)} depths in {len(chunks)} program(s) completed."
                     )
-                    chunk_sets.append(_acquire_chunk_with_retry(
-                        machine, prog, axes, num_shots=num_shots, timeout=timeout, log=log, config=config, qm=qm
-                    ))
-                cond_datasets.append(xr.concat(chunk_sets, dim="sequence_idx"))
-                print(
-                    f"# [Benchmark {c_idx}/{len(conditions)}] condition '{cond}': {total} sequences x "
-                    f"{len(depths)} depths in {len(chunks)} program(s) completed."
-                )
-        return xr.concat(cond_datasets, dim="condition")
+        return xr.concat([xr.concat(results[c], dim="sequence_idx") for c in conditions], dim="condition")
