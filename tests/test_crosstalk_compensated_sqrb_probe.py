@@ -41,7 +41,7 @@ def _mock_machine():
     def qubit(name, rf):
         xy = SimpleNamespace(name=f"{name}.xy", operations={"x180": SimpleNamespace(length=16)}, RF_frequency=rf)
         res = SimpleNamespace(name=f"{name}.res", measure=lambda *a, **kw: None)
-        return SimpleNamespace(name=name, xy=xy, resonator=res, reset=lambda *a: None, readout_state=lambda *a: None)
+        return SimpleNamespace(name=name, xy=xy, resonator=res, reset=lambda *a, **kw: None, readout_state=lambda *a: None)
 
     q1, q2 = qubit("q1", 5.143e9), qubit("q2", 5.191e9)
     mach = SimpleNamespace(declare_qua_variables=_decl, initialize_qpu=lambda **kw: None, qubits={"q1": q1, "q2": q2})
@@ -54,7 +54,7 @@ def _recording_machine():
     events = []
     for q in (q1, q2):
         q.resonator.measure = lambda *a, _n=q.name, **kw: events.append(("measure", _n))
-        q.reset = lambda *a, _n=q.name: events.append(("reset", _n))
+        q.reset = lambda *a, _n=q.name, **kw: events.append(("reset", _n))
     return mach, q1, q2, events
 
 

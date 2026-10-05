@@ -26,12 +26,15 @@ How it runs (each choice was measured on chipQM hardware, 2026-10-01):
   crosstalk_cancellation_tomography in the same context (bidirectional + read_drive).
 * Programs stay short (sequences_per_program): within one ~1 min program the cross-line error
   grew steadily.
+* Each condition runs in its own programs. All three in one program (interleaved shot by shot,
+  or condition blocks per sequence and depth) made q1's simultaneous and compensated error
+  clearly worse than the same settings in separate programs (hardware, 2026-10-05).
 """
 
 from __future__ import annotations
 
 import copy
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import numpy as np
 import xarray as xr
@@ -282,6 +285,7 @@ def build_program(
     drive_init_phase: float = 0.0,
     cancel_tone: str = "aggressor",
     reset_type: str = "thermal",
+    reset_max_attempts: int = 1,
     use_state_discrimination: bool = False,
     seed: int | None = None,
     simulate: bool = False,
@@ -364,8 +368,8 @@ def build_program(
                         assign(seqs[f"gates_{key}"][k_rec], seqs[f"inv_{key}"][s * seqs["n_d"] + j])
                     with for_(n, 0, n < num_shots, n + 1):
                         for play_cond, read_idx in passes:
-                            probe_qubit.reset(reset_type, simulate)
-                            drive_qubit.reset(reset_type, simulate)
+                            probe_qubit.reset(reset_type, simulate, max_attempts=reset_max_attempts)
+                            drive_qubit.reset(reset_type, simulate, max_attempts=reset_max_attempts)
                             phase_reset(xy_elems, ref_marker=probe_qubit.xy.name if phase_ref_timestamps else None)
                             # victim tone: every Clifford turns the frame before it plays, so start
                             # one step back - Clifford k then plays at init_phase + k * step
@@ -588,6 +592,9 @@ def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool,
 class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
     """Crosstalk Compensated SQRB on QM OPX1000."""
 
+    # every pass resets both qubits and reads at the calibrated readout condition
+    supports_active_reset: ClassVar[bool] = True
+
     def _select_pair(self):
         from scqo_qm.experiments._lib import select_qubits
 
@@ -610,7 +617,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         return self._patch_config(config, probe_qubit, drive_qubit)
 
     def _program_kwargs(self) -> dict[str, Any]:
-        from ._reset import check_reset_method
+        from ._reset import check_reset_method, reset_max_attempts
 
         return dict(
             cancel_amp=float(self.params.cancel_amp),
@@ -620,6 +627,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             drive_init_phase=float(self.params.drive_init_phase),
             cancel_tone=self.params.cancel_tone,
             reset_type=check_reset_method(self),
+            reset_max_attempts=reset_max_attempts(self),
             use_state_discrimination=bool(self.params.use_state_discrimination),
             seed=self.params.seed,
             simulate=getattr(self.backend, "simulate", False),

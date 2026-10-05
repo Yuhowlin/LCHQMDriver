@@ -21,7 +21,7 @@ context matches (bidirectional + read_drive for a bidirectional benchmark).
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, ClassVar, Optional
 
 import numpy as np
 import xarray as xr
@@ -50,6 +50,7 @@ def build_program(
     bases: list[str],
     num_shots: int,
     reset_type: str = "thermal",
+    reset_max_attempts: int = 1,
     use_state_discrimination: bool = False,
     simulate: bool = False,
     bidirectional: bool = False,
@@ -67,9 +68,22 @@ def build_program(
     The shot starts with crosstalk_compensated_sqrb.phase_reset, as the benchmark does;
     phase_ref_timestamps adds its 'ts_ref' marker and a 'ts_end' marker on the cancel element right
     after the last pulse (first pulse = ts_end - N x pulse length; the pulses are strict-timed).
+
+    The bases share one pulse train: the basis is a QUA loop and the pre-rotation plays both
+    -y90 and x90 scaled 1/0 by the basis (2026-10-05, hardware: a play inside a real-time branch
+    on the basis - switch_ or if_/elif_ - hung the job). That makes the program 3x smaller than
+    with the bases unrolled, so a usual sweep fits one program. The conditions stay unrolled with
+    fixed plays and waits: switching them by QUA amplitudes changed the cancel_only trajectory on
+    hardware (2026-10-05).
     """
     if cancel_tone not in ("aggressor", "victim"):
         raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
+    unknown = [c for c in conditions if c not in ("noise_only", "cancel_only", "compensated")]
+    if unknown:
+        raise ValueError(f"unknown conditions {unknown}")
+    unknown = [b for b in bases if str(b).lower() not in ("z", "x", "y")]
+    if unknown:
+        raise ValueError(f"unknown bases {unknown}")
     cancel_step = -float(sub_phase_rate_turns) if cancel_tone == "aggressor" else 0.0
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
     reverse_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
@@ -102,6 +116,11 @@ def build_program(
         init_phase_fixed = declare(fixed)
         assign(amp_fixed, float(cancel_amp))
         assign(init_phase_fixed, float(init_phase / (2.0 * np.pi)))
+        # basis pre-rotation amplitudes: -y90 maps x onto z, x90 maps y onto z
+        pre_x_amps = declare(fixed, value=[1.0 if str(b).lower() == "x" else 0.0 for b in bases])
+        pre_y_amps = declare(fixed, value=[1.0 if str(b).lower() == "y" else 0.0 for b in bases])
+        b_idx = declare(int)
+        pre_x, pre_y = declare(fixed), declare(fixed)
 
         machine.initialize_qpu(target=probe_qubit)
         machine.initialize_qpu(target=drive_qubit)
@@ -110,10 +129,12 @@ def build_program(
         for cond in conditions:
             for r_val in repetitions:
                 r_int = int(r_val)
-                for b_str in bases:
+                with for_(b_idx, 0, b_idx < len(bases), b_idx + 1):
+                    assign(pre_x, pre_x_amps[b_idx])
+                    assign(pre_y, pre_y_amps[b_idx])
                     with for_(n, 0, n < num_shots, n + 1):
-                        probe_qubit.reset(reset_type, simulate)
-                        drive_qubit.reset(reset_type, simulate)
+                        probe_qubit.reset(reset_type, simulate, max_attempts=reset_max_attempts)
+                        drive_qubit.reset(reset_type, simulate, max_attempts=reset_max_attempts)
 
                         phase_reset(elems, ref_marker=probe_qubit.xy.name if phase_ref_timestamps else None)
                         with strict_timing_():
@@ -144,12 +165,11 @@ def build_program(
 
                         align(*elems)
 
-                        # Tomography basis pre-rotation on probe_qubit
-                        b_lower = str(b_str).lower()
-                        if b_lower == "x":
-                            probe_qubit.xy.play("-y90")
-                        elif b_lower == "y":
-                            probe_qubit.xy.play("x90")
+                        # Tomography basis pre-rotation on probe_qubit: both rotations always play,
+                        # scaled 1 or 0 by the basis. A play inside a real-time branch here (switch_
+                        # or if_/elif_ on the basis) hung the job on hardware (2026-10-05).
+                        probe_qubit.xy.play("-y90", amplitude_scale=pre_x)
+                        probe_qubit.xy.play("x90", amplitude_scale=pre_y)
 
                         align()
                         if use_state_discrimination:
@@ -180,6 +200,9 @@ def build_program(
 @register
 class CrosstalkCancellationTomography(_CoreTomography):
     """Concrete Crosstalk Cancellation Tomography running on QM OPX/QUAM hardware."""
+
+    # every shot resets both qubits and reads them at the calibrated readout condition
+    supports_active_reset: ClassVar[bool] = True
 
     def _select_pair(self):
         machine = self.backend.machine
@@ -221,7 +244,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
         return self._patch(copy.deepcopy(config), probe_qubit, drive_qubit)
 
     def _program_kwargs(self, probe_qubit, drive_qubit) -> dict:
-        from ._reset import check_reset_method
+        from ._reset import check_reset_method, reset_max_attempts
 
         # the helper refuses a reset this program cannot honour instead of thermalizing silently
         reset_type = check_reset_method(self, qubits=[probe_qubit.name, drive_qubit.name])
@@ -231,6 +254,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
             init_phase=float(self.params.init_phase),
             sub_phase_rate_turns=self._sub_phase_rate_turns(probe_qubit, drive_qubit),
             reset_type=reset_type,
+            reset_max_attempts=reset_max_attempts(self),
             use_state_discrimination=bool(self.params.use_state_discrimination),
             simulate=getattr(self.backend, "simulate", False),
             bidirectional=bool(self.params.bidirectional),

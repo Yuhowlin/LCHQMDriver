@@ -45,14 +45,14 @@ def _mock_machine():
         name="q1",
         xy=q1_xy,
         resonator=q1_res,
-        reset=lambda *a: None,
+        reset=lambda *a, **kw: None,
         readout_state=lambda *a: None,
     )
     q2 = SimpleNamespace(
         name="q2",
         xy=q2_xy,
         resonator=q2_res,
-        reset=lambda *a: None,
+        reset=lambda *a, **kw: None,
         readout_state=lambda *a: None,
     )
 
@@ -115,6 +115,27 @@ def test_cancel_follows_the_drive_frame_with_a_global_phase_reset():
     assert steps("q2.xy").count(-0.12) == 9
     # the idle reverse cancel element never plays, so it never steps
     assert steps("q2.xy_cancel") == []
+
+
+def test_bases_share_one_pulse_train_without_a_branch():
+    import re
+    from qm import generate_qua_script
+
+    mach, q1, q2 = _mock_machine()
+    prog, axes = build_program(
+        mach, q1, q2, target_gate="x180", cancel_amp=0.035, init_phase=0.0, sub_phase_rate_turns=0.12,
+        repetitions=[0, 2, 5], conditions=["compensated"], bases=["z", "x", "y"], num_shots=1,
+        bidirectional=True,
+    )
+    sc = generate_qua_script(prog).replace("'", '"')
+    # one pulse train per repetition count, whatever the number of bases
+    assert len(re.findall(r'play\("x180", "q2\.xy"\)', sc)) == 2 + 5
+    # the pre-rotation is amplitude-switched per basis: a play in a real-time branch hung the job
+    assert "if_(" not in sc and "switch_(" not in sc
+    assert "[0.0, 1.0, 0.0]" in sc and "[0.0, 0.0, 1.0]" in sc
+    assert list(axes["basis"].values) == ["z", "x", "y"]
+    with pytest.raises(ValueError, match="bases"):
+        build_program(mach, q1, q2, repetitions=[1], conditions=["compensated"], bases=["w"], num_shots=1)
 
 
 def test_removed_tone_and_reset_options_are_gone():

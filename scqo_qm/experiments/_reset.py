@@ -106,6 +106,7 @@ ACTIVE_RESET_ATTR = "supports_active_reset"
 #: The four that opt in, for the refusal message only (the authority is the class
 #: attribute — this is a hint, and the census test keeps it honest).
 _CARRIERS = ("qubit_relaxation, qubit_ramsey, qubit_echo, qubit_power_rabi, "
+             "crosstalk_cancellation_tomography, crosstalk_compensated_sqrb, "
              "qc_unidirectional_trotter")
 
 #: QUAM ``ReadoutResonator.depletion_time`` factory default (ns). An ungoverned

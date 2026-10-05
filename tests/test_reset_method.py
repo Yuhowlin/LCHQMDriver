@@ -49,7 +49,10 @@ CARRIERS = {"qubit_relaxation", "qubit_ramsey", "qubit_ramsey_phasor",
             "qubit_spectroscopy",
             # the chain family: a between-shots reset of every qubit a shot
             # touches, one joint readout at a fixed condition (5Q4C 2026-09-29)
-            "qc_unidirectional_trotter", "qc_trotter_compensation"}
+            "qc_unidirectional_trotter", "qc_trotter_compensation",
+            # the crosstalk pair: every shot (pass) resets both qubits and reads them at the
+            # calibrated condition (chipQM 2026-10-05)
+            "crosstalk_cancellation_tomography", "crosstalk_compensated_sqrb"}
 
 #: the chain shells, which reset more qubits than they read out.
 CHAIN_SHELLS = ("qc_unidirectional_trotter", "qc_trotter_compensation")
