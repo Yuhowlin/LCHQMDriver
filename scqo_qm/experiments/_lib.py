@@ -9,6 +9,7 @@ Flux amplitude/rail validation lives in ``_flux_limits.py`` — a probe asking
 "may this port emit these volts?" imports from there, not here.
 """
 
+from contextlib import contextmanager
 from typing import Callable, List, Optional
 
 import xarray as xr
@@ -53,6 +54,16 @@ def select_qubit_pairs(machine, names: Optional[List[str]] = None, *,
     return BatchableList(pairs, batched_groups)
 
 
+@contextmanager
+def shared_qm(machine, config: Optional[dict] = None, *, timeout: float):
+    """One QM for several programs of one run: open (waiting while the QOP is busy), yield,
+    close. Pass it to acquire(..., qm=) so each program skips its own open and close; the
+    programs themselves are unchanged."""
+    config = config if config is not None else machine.generate_config()
+    with qm_session(machine.connect(), config, timeout=timeout) as qm:
+        yield qm
+
+
 def acquire(
     machine,
     prog,
@@ -62,6 +73,7 @@ def acquire(
     timeout: float,
     log: Optional[Callable] = None,
     config: Optional[dict] = None,
+    qm=None,
 ) -> xr.Dataset:
     """Connect to the QOP, execute the program and fetch the raw xr.Dataset.
 
@@ -69,25 +81,32 @@ def acquire(
     probes share this one implementation. `config` defaults to
     `machine.generate_config()`; pass an explicit config when the program needs a
     pre-built one (e.g. a baked config carrying baking ops the fresh config lacks).
+    `qm`: an already open QM (shared_qm) to run on; without it, this opens and closes one.
     """
+    if qm is not None:
+        return _execute_and_fetch(qm, prog, sweep_axes, num_shots=num_shots, log=log)
     qmm = machine.connect()
     config = config if config is not None else machine.generate_config()
     # Execute the QUA program only if the quantum machine is available (this is to avoid interrupting running jobs).
     with qm_session(qmm, config, timeout=timeout) as qm:
-        job = qm.execute(prog)
-        data_fetcher = XarrayDataFetcher(job, sweep_axes)
-        for dataset in data_fetcher:
-            progress_counter(
-                data_fetcher.get("n", 0),
-                num_shots,
-                start_time=data_fetcher.t_start,
-            )
-        # Expose possible runtime errors. execution_report is a method on some QM
-        # API versions and a property on others — tolerate both.
-        if log:
-            rep = getattr(job, "execution_report", None)
-            if callable(rep):
-                log(rep())
-            elif rep is not None:
-                log(rep)
+        return _execute_and_fetch(qm, prog, sweep_axes, num_shots=num_shots, log=log)
+
+
+def _execute_and_fetch(qm, prog, sweep_axes, *, num_shots: int, log: Optional[Callable] = None) -> xr.Dataset:
+    job = qm.execute(prog)
+    data_fetcher = XarrayDataFetcher(job, sweep_axes)
+    for dataset in data_fetcher:
+        progress_counter(
+            data_fetcher.get("n", 0),
+            num_shots,
+            start_time=data_fetcher.t_start,
+        )
+    # Expose possible runtime errors. execution_report is a method on some QM
+    # API versions and a property on others — tolerate both.
+    if log:
+        rep = getattr(job, "execution_report", None)
+        if callable(rep):
+            log(rep())
+        elif rep is not None:
+            log(rep)
     return dataset

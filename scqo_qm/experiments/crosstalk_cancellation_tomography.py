@@ -32,7 +32,7 @@ from scqo.experiments.crosstalk_cancellation_tomography import (
     CrosstalkCancellationTomography as _CoreTomography,
     compute_theoretical_phase_rate,
 )
-from scqo_qm.experiments._lib import acquire as _acquire, select_qubits
+from scqo_qm.experiments._lib import acquire as _acquire, select_qubits, shared_qm
 from .crosstalk_compensated_sqrb import _patch_cancel_element, phase_reset
 
 
@@ -295,14 +295,15 @@ class CrosstalkCancellationTomography(_CoreTomography):
             print(f"# [Tomography] Executing {len(reps)} repetition points in {len(batches)} batches (batch_size={batch_size})...")
 
         datasets: list[xr.Dataset] = []
-        for b_idx, batch in enumerate(batches):
-            prog, sweep_axes = build_program(
-                machine, probe_qubit, drive_qubit, repetitions=batch, conditions=conditions,
-                bases=bases, num_shots=num_shots, **self._program_kwargs(probe_qubit, drive_qubit),
-            )
-            datasets.append(_acquire(
-                machine, prog, sweep_axes, num_shots=num_shots, timeout=timeout, log=log, config=config
-            ))
-            if len(batches) > 1:
-                print(f"# [Tomography Batch {b_idx + 1}/{len(batches)}] Repetitions {batch} completed.")
+        with shared_qm(machine, config, timeout=timeout) as qm:  # one QM for every batch
+            for b_idx, batch in enumerate(batches):
+                prog, sweep_axes = build_program(
+                    machine, probe_qubit, drive_qubit, repetitions=batch, conditions=conditions,
+                    bases=bases, num_shots=num_shots, **self._program_kwargs(probe_qubit, drive_qubit),
+                )
+                datasets.append(_acquire(
+                    machine, prog, sweep_axes, num_shots=num_shots, timeout=timeout, log=log, config=config, qm=qm
+                ))
+                if len(batches) > 1:
+                    print(f"# [Tomography Batch {b_idx + 1}/{len(batches)}] Repetitions {batch} completed.")
         return datasets[0] if len(datasets) == 1 else xr.concat(datasets, dim="repetitions")

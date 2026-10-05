@@ -361,12 +361,27 @@ def test_acquire_benchmark_runs_each_condition_in_short_programs(monkeypatch):
             coords={k: s[k].values for k in ("qubit", "condition", "sequence_idx", "depth")},
         )
 
+    from contextlib import contextmanager
+
+    opened = []
+
+    @contextmanager
+    def fake_shared_qm(machine, config=None, *, timeout):
+        opened.append(object())
+        yield opened[-1]
+
+    qms = []
+    monkeypatch.setattr(mod, "shared_qm", fake_shared_qm)
     monkeypatch.setattr(mod, "_acquire", mock_acquire)
-    monkeypatch.setattr(mod, "_acquire_chunk_with_retry", lambda m, p, s, **kw: mock_acquire(m, p, s, **kw))
+    monkeypatch.setattr(
+        mod, "_acquire_chunk_with_retry", lambda m, p, s, **kw: (qms.append(kw.get("qm")), mock_acquire(m, p, s, **kw))[1]
+    )
     exp, mach, q1, q2 = _experiment(bidirectional=True, depths=[1, 64, 1024], num_random_sequences=30)
     monkeypatch.setattr(QMCrosstalkCompensatedSQRB, "_program_kwargs", lambda self: dict(bidirectional=True))
     res = exp._acquire_benchmark(mach, num_shots=1, probe_qubit=q1, drive_qubit=q2)
     assert len(calls) == 3 * 5  # 3 conditions x ceil(30 / 7) programs
+    # one QM for the whole benchmark, handed to every program
+    assert len(opened) == 1 and qms == [opened[0]] * len(calls)
     assert all(len(seqs) <= 7 for _, seqs in calls)
     assert dict(res.sizes) == {"qubit": 2, "condition": 3, "sequence_idx": 30, "depth": 3}
     assert list(res.coords["condition"].values) == ["isolated", "simultaneous", "compensated"]

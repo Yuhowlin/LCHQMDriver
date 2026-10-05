@@ -43,7 +43,7 @@ from qualang_tools.bakery.randomized_benchmark_c1 import c1_table
 
 from scqo import register
 from scqo.experiments.crosstalk_compensated_sqrb import CrosstalkCompensatedSQRB
-from scqo_qm.experiments._lib import acquire as _acquire
+from scqo_qm.experiments._lib import acquire as _acquire, shared_qm
 
 # Recovery gates lookup: inv_gates[i] is the Clifford gate index that resets state i to 0
 inv_gates = [int(np.where(c1_table[i, :] == 0)[0][0]) for i in range(24)]
@@ -677,25 +677,28 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         probe_qubit=None,
         drive_qubit=None,
     ) -> xr.Dataset:
-        """Run every condition, in programs of at most sequences_per_program sequences x every depth."""
+        """Run every condition, in programs of at most sequences_per_program sequences x every depth,
+        all on one QM (shared_qm): the programs are unchanged, only the per-program open and close
+        of the QM is gone."""
         conditions = self.params.get_conditions()
         depths = [int(x) for x in self.params.get_depths()]
         total = int(self.params.num_random_sequences)
         chunks = sequence_chunks(total, max(depths), int(self.params.sequences_per_program))
         cond_datasets = []
-        for c_idx, cond in enumerate(conditions, 1):
-            chunk_sets = []
-            for chunk in chunks:
-                prog, axes = build_program(
-                    machine, probe_qubit, drive_qubit, depths=depths, conditions=[cond],
-                    num_sequences=total, sequence_indices=chunk, num_shots=num_shots, **self._program_kwargs(),
+        with shared_qm(machine, config, timeout=timeout) as qm:
+            for c_idx, cond in enumerate(conditions, 1):
+                chunk_sets = []
+                for chunk in chunks:
+                    prog, axes = build_program(
+                        machine, probe_qubit, drive_qubit, depths=depths, conditions=[cond],
+                        num_sequences=total, sequence_indices=chunk, num_shots=num_shots, **self._program_kwargs(),
+                    )
+                    chunk_sets.append(_acquire_chunk_with_retry(
+                        machine, prog, axes, num_shots=num_shots, timeout=timeout, log=log, config=config, qm=qm
+                    ))
+                cond_datasets.append(xr.concat(chunk_sets, dim="sequence_idx"))
+                print(
+                    f"# [Benchmark {c_idx}/{len(conditions)}] condition '{cond}': {total} sequences x "
+                    f"{len(depths)} depths in {len(chunks)} program(s) completed."
                 )
-                chunk_sets.append(_acquire_chunk_with_retry(
-                    machine, prog, axes, num_shots=num_shots, timeout=timeout, log=log, config=config
-                ))
-            cond_datasets.append(xr.concat(chunk_sets, dim="sequence_idx"))
-            print(
-                f"# [Benchmark {c_idx}/{len(conditions)}] condition '{cond}': {total} sequences x "
-                f"{len(depths)} depths in {len(chunks)} program(s) completed."
-            )
         return xr.concat(cond_datasets, dim="condition")
