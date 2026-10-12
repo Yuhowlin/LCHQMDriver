@@ -33,7 +33,7 @@ from scqo.experiments.crosstalk_cancellation_tomography import (
     compute_theoretical_phase_rate,
 )
 from scqo_qm.experiments._lib import acquire as _acquire, select_qubits, shared_qm
-from .crosstalk_compensated_sqrb import _patch_cancel_element, phase_reset
+from .crosstalk_compensated_sqrb import _patch_cancel_element, phase_reset, shift_line_delay
 
 
 def build_program(
@@ -235,7 +235,7 @@ class CrosstalkCancellationTomography(_CoreTomography):
         pairs = [(probe_qubit, drive_qubit)] + ([(drive_qubit, probe_qubit)] if self.params.bidirectional else [])
         for victim, aggressor in sorted(pairs, key=lambda p: p[0].xy.name):
             config = _patch_cancel_element(config, victim, aggressor, tone=self.params.cancel_tone)
-        return config
+        return shift_line_delay(config, probe_qubit, drive_qubit, int(getattr(self.params, "line_delay_ns", 0)))
 
     def patch_preview_config(self, config: dict) -> dict:
         import copy

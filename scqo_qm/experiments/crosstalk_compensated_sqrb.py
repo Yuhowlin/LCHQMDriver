@@ -567,6 +567,23 @@ def _patch_composite_cliffords(
     return config
 
 
+def shift_line_delay(config: dict, probe_qubit, drive_qubit, line_delay_ns: int) -> dict:
+    """Delay one qubit's xy output port by |line_delay_ns| ns on top of its configured delay.
+
+    > 0 delays the probe's port (its pulses and the cancellation element on the same port), < 0 the
+    drive's: the cancellation on the probe's line moves by line_delay_ns against the leak coming
+    from the drive's line, and a reverse cancellation on the drive's line by -line_delay_ns.
+    """
+    shift = int(line_delay_ns)
+    if shift == 0:
+        return config
+    qubit = probe_qubit if shift > 0 else drive_qubit
+    con, fem, port = config["elements"][qubit.xy.name]["MWInput"]["port"]
+    out = config["controllers"][con]["fems"][fem]["analog_outputs"][port]
+    out["delay"] = int(out.get("delay", 0)) + abs(shift)
+    return config
+
+
 def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool, cancel_tone: str = "aggressor") -> dict:
     """Cancel element(s) and composite Clifford ops for build_program.
 
@@ -605,10 +622,11 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         return q_dict.get(probe_name, qubits[0]), q_dict.get(drive_name, qubits[1])
 
     def _patch_config(self, config: dict, probe_qubit, drive_qubit) -> dict:
-        return patch_config(
+        config = patch_config(
             config, probe_qubit, drive_qubit, bidirectional=bool(self.params.bidirectional),
             cancel_tone=self.params.cancel_tone,
         )
+        return shift_line_delay(config, probe_qubit, drive_qubit, int(getattr(self.params, "line_delay_ns", 0)))
 
     def patch_preview_config(self, config: dict) -> dict:
         """Patch the cancellation element(s) and composite ops into the generated config for preview."""

@@ -409,3 +409,18 @@ def test_chunk_retry_on_transient_qop_error(monkeypatch):
     monkeypatch.setattr(mod, "_acquire", broken)
     with pytest.raises(ValueError):
         mod._acquire_chunk_with_retry(None, None, None, pause_s=0)
+
+
+def test_line_delay_shifts_one_xy_port_on_top_of_its_delay():
+    from scqo_qm.experiments.crosstalk_compensated_sqrb import shift_line_delay
+
+    def cfg():
+        c = _full_config()
+        c["controllers"] = {"con1": {"fems": {6: {"analog_outputs": {2: {"delay": 20}, 4: {"delay": 20}, 1: {"delay": 0}}}}}}
+        return c
+
+    q1, q2 = SimpleNamespace(xy=SimpleNamespace(name="q1.xy")), SimpleNamespace(xy=SimpleNamespace(name="q2.xy"))
+    ports = lambda c: {p: v["delay"] for p, v in c["controllers"]["con1"]["fems"][6]["analog_outputs"].items()}  # noqa: E731
+    assert ports(shift_line_delay(cfg(), q1, q2, 0)) == {2: 20, 4: 20, 1: 0}
+    assert ports(shift_line_delay(cfg(), q1, q2, 3)) == {2: 23, 4: 20, 1: 0}    # probe's line later
+    assert ports(shift_line_delay(cfg(), q1, q2, -2)) == {2: 20, 4: 22, 1: 0}   # drive's line later
