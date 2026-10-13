@@ -206,6 +206,22 @@ def test_cancel_copies_play_scaled_with_their_phase_and_no_frame_steps():
     assert "reset_global_phase()" in sc
 
 
+def test_leak_phase_twirl_turns_each_aggressor_and_its_copy_by_one_random_phase():
+    sc = _script(_program(conditions=["compensated"], bidirectional=True, drive_cancel_amp=0.02,
+                          leak_phase_twirl=True)[0])
+    assert sc.count(".rand_fixed()") == 2
+    turns = re.findall(r'frame_rotation_2pi\((v\d+), "(q[12]\.xy(?:_cancel)?)"\)', sc)
+    by_var = {}
+    for var, elem in turns:
+        by_var.setdefault(var, set()).add(elem)
+    # q2 drives the probe-line cancel, q1 the drive-line cancel; each pair shares its phase
+    assert sorted(map(sorted, by_var.values())) == [["q1.xy", "q2.xy_cancel"], ["q1.xy_cancel", "q2.xy"]]
+    off = _script(_program(conditions=["compensated"], bidirectional=True, drive_cancel_amp=0.02)[0])
+    assert "rand_fixed" not in off
+    with pytest.raises(ValueError, match="leak_phase_twirl"):
+        _program(cancel_tone="victim", leak_phase_twirl=True)
+
+
 def test_recovery_is_written_into_the_loop_and_restored():
     sc = _script(_program(conditions=["compensated"])[0])
     # slot d of each gate array takes the recovery before the shots and gets its gate back after

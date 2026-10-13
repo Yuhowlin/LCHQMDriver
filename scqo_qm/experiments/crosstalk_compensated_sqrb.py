@@ -291,6 +291,7 @@ def build_program(
     simulate: bool = False,
     debug_timestamps: bool = False,
     phase_ref_timestamps: bool = False,
+    leak_phase_twirl: bool = False,
 ):
     """Build the crosstalk-compensated SQRB program (config: QMCrosstalkCompensatedSQRB._patch_config).
 
@@ -303,9 +304,17 @@ def build_program(
     the probe-line cancel's loop, nothing between the reset and the first pulse (for
     victim_tone_phase_offset: first pulse = ts_end - (d + 1) x 12 cycles). A timestamp inside the
     switch_ cases did not compile. Not with debug_timestamps.
+    leak_phase_twirl: every shot turns each aggressor's xy frame and the frame of the cancel copying
+    it by the same random phase (FPGA Random, uniform in [0, 1) turns). The aggressor's own RB is
+    unchanged (its whole sequence is conjugated by one Z), the cancel still follows the leak, but the
+    leak's phase against the victim is random per shot: with a fixed set of sequences, coherent
+    leak residuals no longer interfere the same way in every run (theory, 2026-10-13). Aggressor
+    tone only: the extra instructions before the loops would move a victim-tone cancel's phase.
     """
     if cancel_tone not in CANCEL_TONES:
         raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
+    if leak_phase_twirl and cancel_tone != "aggressor":
+        raise ValueError("leak_phase_twirl needs cancel_tone='aggressor'")
     depth_arr = np.asarray(depths, dtype=int)
     if depth_arr.min() < 1:
         raise ValueError("depths must be >= 1")
@@ -345,6 +354,12 @@ def build_program(
         m_st = declare_stream()
         seqs = _declare_sequences(depth_arr, seq_arr, seed=seed)
         s, j, d, base, k_rec, k_stop = (seqs[k] for k in ("s", "j", "d", "base", "k_rec", "k_stop"))
+        if leak_phase_twirl:
+            twirl_rng = Random(seed=(seed if seed is not None else 42) + 2000)
+            # (aggressor xy, the cancel copying it): the probe-line cancel copies the drive qubit
+            twirls = [(declare(fixed), drive_qubit.xy.name, cancel_elem)]
+            if reverse_cancel_elem is not None:
+                twirls.append((declare(fixed), probe_qubit.xy.name, reverse_cancel_elem))
 
         machine.initialize_qpu(target=probe_qubit)
         machine.initialize_qpu(target=drive_qubit)
@@ -381,6 +396,11 @@ def build_program(
                                     float(drive_init_phase) / (2 * np.pi) - clifford_step.get(reverse_cancel_elem, 0.0),
                                     reverse_cancel_elem,
                                 )
+                            if leak_phase_twirl:
+                                for phi, aggressor_elem, copy_elem in twirls:
+                                    assign(phi, twirl_rng.rand_fixed())
+                                    frame_rotation_2pi(phi, aggressor_elem)
+                                    frame_rotation_2pi(phi, copy_elem)
                             align(*xy_elems)
 
                             elements = _played_elements(play_cond, **elem_kw)
@@ -649,6 +669,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             use_state_discrimination=bool(self.params.use_state_discrimination),
             seed=self.params.seed,
             simulate=getattr(self.backend, "simulate", False),
+            leak_phase_twirl=bool(getattr(self.params, "leak_phase_twirl", False)),
         )
 
     def probe(self) -> Any:
