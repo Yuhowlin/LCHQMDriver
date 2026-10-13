@@ -292,6 +292,7 @@ def build_program(
     debug_timestamps: bool = False,
     phase_ref_timestamps: bool = False,
     leak_phase_twirl: bool = False,
+    dummy_load: bool = False,
 ):
     """Build the crosstalk-compensated SQRB program (config: QMCrosstalkCompensatedSQRB._patch_config).
 
@@ -310,6 +311,9 @@ def build_program(
     leak's phase against the victim is random per shot: with a fixed set of sequences, coherent
     leak residuals no longer interfere the same way in every run (theory, 2026-10-13). Aggressor
     tone only: the extra instructions before the loops would move a victim-tone cancel's phase.
+    dummy_load: in the probe's isolated pass the drive qubit's `<xy>_dummy` element (patch_config
+    with dummy_load_detuning_hz) plays the drive's sequence far off resonance, so the isolated RB
+    carries the drive line's power without its leak. Simultaneous / compensated are unchanged.
     """
     if cancel_tone not in CANCEL_TONES:
         raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
@@ -325,6 +329,9 @@ def build_program(
     cancel_elem = f"{probe_qubit.xy.name}_cancel"
     reverse_cancel_elem = f"{drive_qubit.xy.name}_cancel" if bidirectional else None
     xy_elems = [probe_qubit.xy.name, drive_qubit.xy.name, cancel_elem] + ([reverse_cancel_elem] if bidirectional else [])
+    dummy_elem = f"{drive_qubit.xy.name}_dummy" if dummy_load else None
+    if dummy_elem is not None:
+        xy_elems.append(dummy_elem)
     read_qubits = [probe_qubit, drive_qubit] if bidirectional else [probe_qubit]
     # victim tone: frame turn per Clifford (3 subslots) on each cancel element
     clifford_step = {}
@@ -404,6 +411,8 @@ def build_program(
                             align(*xy_elems)
 
                             elements = _played_elements(play_cond, **elem_kw)
+                            if dummy_elem is not None and play_cond == "isolated":
+                                elements.append((dummy_elem, "d", None))
                             if debug_timestamps:
                                 for element, _, _ in elements:
                                     play("x180" * amp(0.0), element, timestamp_stream=f"ts0_{play_cond}_{element}")
@@ -480,6 +489,59 @@ def sequence_chunks(num_sequences: int, max_depth: int, per_program: int) -> lis
 # --------------------------------------------------------------------------- config
 
 
+def _assign_free_core(config: dict, elem_dict: dict) -> None:
+    """Give `elem_dict` (a copy of an element) the next hardware core unused on its FEM."""
+    fem_port = None
+    if isinstance(elem_dict.get("MWInput"), dict):
+        fem_port = elem_dict["MWInput"].get("port")
+    elif isinstance(elem_dict.get("mixInputs"), dict):
+        fem_port = elem_dict["mixInputs"].get("I")
+    if not (fem_port and len(fem_port) >= 2):
+        return
+    fem_id = fem_port[:2]
+    used_cores = set()
+    for el in config["elements"].values():
+        if not isinstance(el, dict):
+            continue
+        core = el.get("core") or el.get("thread")
+        el_port = None
+        if isinstance(el.get("MWInput"), dict):
+            el_port = el["MWInput"].get("port")
+        elif isinstance(el.get("mixInputs"), dict):
+            el_port = el["mixInputs"].get("I")
+        if core and el_port and len(el_port) >= 2 and el_port[:2] == fem_id:
+            used_cores.add(core)
+    available = [c for c in "abcdefgh" if c not in used_cores]
+    new_core = available[0] if available else ("f" if elem_dict.get("core") != "f" else "g")
+    if "core" in elem_dict:
+        elem_dict["core"] = new_core
+    if "thread" in elem_dict:
+        elem_dict["thread"] = new_core
+
+
+def _patch_dummy_element(config: dict, qubit: Any, detuning_hz: float) -> dict:
+    """Add `<qubit xy>_dummy`: the qubit's own line and pulses, `detuning_hz` away, a free core.
+
+    A load without a target: in the probe's isolated pass it plays the drive qubit's sequence at the
+    drive's amplitude, but far from every transition, so the probe's isolated RB sees the drive line's
+    power (heating, dissipation) without its resonant leak (10/13: is part of the floor power-induced?).
+    """
+    name = f"{qubit.xy.name}_dummy"
+    if name in config.get("elements", {}):
+        return config
+    elem_dict = copy.deepcopy(config["elements"][qubit.xy.name])
+    _assign_free_core(config, elem_dict)
+    new_if = float(elem_dict["intermediate_frequency"]) + float(detuning_hz)
+    if abs(new_if) > 400e6:
+        raise ValueError(
+            f"the dummy element needs IF {new_if / 1e6:.1f} MHz on {qubit.xy.name}'s line, "
+            "outside the MW-FEM +-400 MHz band"
+        )
+    elem_dict["intermediate_frequency"] = new_if
+    config["elements"][name] = elem_dict
+    return config
+
+
 def _patch_cancel_element(config: dict, victim_qubit: Any, aggressor_qubit: Any, *, tone: str = "aggressor") -> dict:
     """Add `<victim xy>_cancel`: the victim's line, the aggressor's pulses, a free core.
 
@@ -502,32 +564,7 @@ def _patch_cancel_element(config: dict, victim_qubit: Any, aggressor_qubit: Any,
         if op in aggressor_ops:
             elem_dict.setdefault("operations", {})[op] = copy.deepcopy(aggressor_ops[op])
 
-    # Assign an independent hardware core on the same FEM
-    fem_port = None
-    if isinstance(elem_dict.get("MWInput"), dict):
-        fem_port = elem_dict["MWInput"].get("port")
-    elif isinstance(elem_dict.get("mixInputs"), dict):
-        fem_port = elem_dict["mixInputs"].get("I")
-    if fem_port and len(fem_port) >= 2:
-        fem_id = fem_port[:2]
-        used_cores = set()
-        for el in config["elements"].values():
-            if not isinstance(el, dict):
-                continue
-            core = el.get("core") or el.get("thread")
-            el_port = None
-            if isinstance(el.get("MWInput"), dict):
-                el_port = el["MWInput"].get("port")
-            elif isinstance(el.get("mixInputs"), dict):
-                el_port = el["mixInputs"].get("I")
-            if core and el_port and len(el_port) >= 2 and el_port[:2] == fem_id:
-                used_cores.add(core)
-        available = [c for c in "abcdefgh" if c not in used_cores]
-        new_core = available[0] if available else ("f" if elem_dict.get("core") != "f" else "g")
-        if "core" in elem_dict:
-            elem_dict["core"] = new_core
-        if "thread" in elem_dict:
-            elem_dict["thread"] = new_core
+    _assign_free_core(config, elem_dict)
 
     if tone == "aggressor":
         shift = float(aggressor_qubit.xy.RF_frequency) - float(victim_qubit.xy.RF_frequency)
@@ -604,12 +641,14 @@ def shift_line_delay(config: dict, probe_qubit, drive_qubit, line_delay_ns: int)
     return config
 
 
-def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool, cancel_tone: str = "aggressor") -> dict:
+def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool, cancel_tone: str = "aggressor",
+                 dummy_load_detuning_hz: float = 0.0) -> dict:
     """Cancel element(s) and composite Clifford ops for build_program.
 
     Cancel elements are created in victim-name order (the phase reference is per FEM core, and
     crosstalk_cancellation_tomography uses the same order), so each lands on the core it was
-    calibrated on.
+    calibrated on. A dummy-load element (dummy_load_detuning_hz != 0) is added after them, so it
+    never takes a cancel's core.
     """
     pairs = [(probe_qubit, drive_qubit)] + ([(drive_qubit, probe_qubit)] if bidirectional else [])
     for victim, aggressor in sorted(pairs, key=lambda p: p[0].xy.name):
@@ -619,6 +658,9 @@ def patch_config(config: dict, probe_qubit, drive_qubit, *, bidirectional: bool,
     for victim, aggressor in pairs:
         step = subslot_phase_step(victim, aggressor) if cancel_tone == "victim" else 0.0
         config = _patch_composite_cliffords(config, f"{victim.xy.name}_cancel", aggressor.xy.name, step)
+    if dummy_load_detuning_hz:
+        config = _patch_dummy_element(config, drive_qubit, dummy_load_detuning_hz)
+        config = _patch_composite_cliffords(config, f"{drive_qubit.xy.name}_dummy", drive_qubit.xy.name)
     return config
 
 
@@ -645,6 +687,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
         config = patch_config(
             config, probe_qubit, drive_qubit, bidirectional=bool(self.params.bidirectional),
             cancel_tone=self.params.cancel_tone,
+            dummy_load_detuning_hz=float(getattr(self.params, "dummy_load_detuning_hz", 0.0)),
         )
         return shift_line_delay(config, probe_qubit, drive_qubit, int(getattr(self.params, "line_delay_ns", 0)))
 
@@ -670,6 +713,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             seed=self.params.seed,
             simulate=getattr(self.backend, "simulate", False),
             leak_phase_twirl=bool(getattr(self.params, "leak_phase_twirl", False)),
+            dummy_load=bool(getattr(self.params, "dummy_load_detuning_hz", 0.0)),
         )
 
     def probe(self) -> Any:

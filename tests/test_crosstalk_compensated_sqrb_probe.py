@@ -222,6 +222,29 @@ def test_leak_phase_twirl_turns_each_aggressor_and_its_copy_by_one_random_phase(
         _program(cancel_tone="victim", leak_phase_twirl=True)
 
 
+def test_dummy_load_plays_the_drive_sequence_on_a_detuned_copy_only_in_the_probe_isolated_pass():
+    mach, q1, q2 = _mock_machine()
+    cfg = patch_config(_full_config(), q1, q2, bidirectional=True, dummy_load_detuning_hz=150e6)
+    dummy, cancels = cfg["elements"]["q2.xy_dummy"], ("q1.xy_cancel", "q2.xy_cancel")
+    assert dummy["intermediate_frequency"] == pytest.approx(191e6 + 150e6)
+    assert dummy["MWInput"]["port"] == cfg["elements"]["q2.xy"]["MWInput"]["port"]
+    # created after the cancels: a core of its own, the cancels keep theirs
+    assert dummy["core"] not in {cfg["elements"][e]["core"] for e in ("q1.xy", "q2.xy", *cancels)}
+    assert [cfg["elements"][e]["core"] for e in cancels] == [
+        patch_config(_full_config(), q1, q2, bidirectional=True)["elements"][e]["core"] for e in cancels]
+    assert "clif0" in dummy["operations"]
+    with pytest.raises(ValueError, match="400 MHz"):
+        patch_config(_full_config(), q1, q2, bidirectional=True, dummy_load_detuning_hz=300e6)
+
+    plays_dummy = re.compile(r'play\([^)]*"q2\.xy_dummy"\)')
+    iso = _script(_program(conditions=["isolated"], bidirectional=True, drive_cancel_amp=0.02, dummy_load=True)[0])
+    assert plays_dummy.search(iso)
+    for cond in ("simultaneous", "compensated"):
+        sc = _script(_program(conditions=[cond], bidirectional=True, drive_cancel_amp=0.02, dummy_load=True)[0])
+        assert not plays_dummy.search(sc)
+    assert "xy_dummy" not in _script(_program(conditions=["isolated"], bidirectional=True, drive_cancel_amp=0.02)[0])
+
+
 def test_recovery_is_written_into_the_loop_and_restored():
     sc = _script(_program(conditions=["compensated"])[0])
     # slot d of each gate array takes the recovery before the shots and gets its gate back after
