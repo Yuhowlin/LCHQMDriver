@@ -245,6 +245,17 @@ def test_dummy_load_plays_the_drive_sequence_on_a_detuned_copy_only_in_the_probe
     assert "xy_dummy" not in _script(_program(conditions=["isolated"], bidirectional=True, drive_cancel_amp=0.02)[0])
 
 
+def test_spectator_pi_flips_the_drive_qubit_only_before_the_probe_isolated_pass():
+    flips = re.compile(r'play\("x180", "q2\.xy"\)')
+    iso = _script(_program(conditions=["isolated"], bidirectional=True, drive_cancel_amp=0.02, spectator_pi=True)[0])
+    assert len(flips.findall(iso)) == 1
+    plain = _script(_program(conditions=["isolated"], bidirectional=True, drive_cancel_amp=0.02)[0])
+    assert not flips.search(plain)
+    for cond in ("simultaneous", "compensated"):
+        sc = _script(_program(conditions=[cond], bidirectional=True, drive_cancel_amp=0.02, spectator_pi=True)[0])
+        assert not flips.search(sc)
+
+
 def test_recovery_is_written_into_the_loop_and_restored():
     sc = _script(_program(conditions=["compensated"])[0])
     # slot d of each gate array takes the recovery before the shots and gets its gate back after

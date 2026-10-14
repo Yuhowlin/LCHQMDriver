@@ -33,11 +33,15 @@ def build_program(
     use_state_discrimination: bool,
     simulate: bool = False,
     log: Optional[Callable] = None,
+    spectators=(),
 ):
     """Build the Ramsey QUA program. Returns (program, sweep_axes).
 
     `idle_times_cycles` is the idle-time sweep in clock cycles (4 ns);
     `qubits` is a BatchableList (see `_lib.select_qubits`).
+    `spectators`: qubit objects reset with the targets and put in |1> by one x180 right before the
+    Ramsey (not read out), so the fringe carries the targets' static ZZ shift from them; the same
+    run without spectators is the reference (2026-10-14: q1-q3 ZZ for the floor study).
     """
     # The QM clock resolves idle times to 4 ns. A linear sweep finer than that
     # collapses adjacent points onto the same clock cycle, leaving duplicate
@@ -64,7 +68,7 @@ def build_program(
 
         for multiplexed_qubits in qubits.batch():
             # Initialize the QPU in terms of flux points (flux tunable transmons and/or tunable couplers)
-            for qubit in multiplexed_qubits.values():
+            for qubit in list(multiplexed_qubits.values()) + list(spectators):
                 machine.initialize_qpu(target=qubit)
             align()
 
@@ -76,7 +80,14 @@ def build_program(
                     for i, qubit in multiplexed_qubits.items():
                         qubit.reset(reset_type, simulate, log_callable=log,
                                     max_attempts=reset_max_attempts)
+                    for spectator in spectators:
+                        spectator.reset(reset_type, simulate, log_callable=log,
+                                        max_attempts=reset_max_attempts)
                     align()
+                    if spectators:
+                        for spectator in spectators:
+                            spectator.xy.play("x180")
+                        align()
                     # Qubit manipulation
                     for i, qubit in multiplexed_qubits.items():
                         # The ramp is NEGATED on purpose -- this is not a typo. The
@@ -163,6 +174,10 @@ class QMQubitRamsey(QubitRamsey):
 
         machine = self.backend.machine  # type: ignore[attr-defined]
         qubits = select_qubits(machine, self.params.targets, multiplexed=True)
+        spectator_names = list(getattr(self.params, "spectator_qubits", None) or [])
+        if set(spectator_names) & set(self.params.targets):
+            raise ValueError("spectator_qubits must not overlap targets")
+        spectators = [machine.qubits[name] for name in spectator_names]
 
         # scqo sweeps idle time in ns; the QUA program sweeps in clock cycles (4 ns).
         idle_ns = self.sweep_axes["idle_time_ns"]
@@ -177,4 +192,5 @@ class QMQubitRamsey(QubitRamsey):
             reset_type=check_reset_method(self),
             reset_max_attempts=reset_max_attempts(self),
             use_state_discrimination=bool(self.params.use_state_discrimination),
+            spectators=spectators,
         )

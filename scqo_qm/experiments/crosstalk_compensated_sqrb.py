@@ -293,6 +293,7 @@ def build_program(
     phase_ref_timestamps: bool = False,
     leak_phase_twirl: bool = False,
     dummy_load: bool = False,
+    spectator_pi: bool = False,
 ):
     """Build the crosstalk-compensated SQRB program (config: QMCrosstalkCompensatedSQRB._patch_config).
 
@@ -314,6 +315,9 @@ def build_program(
     dummy_load: in the probe's isolated pass the drive qubit's `<xy>_dummy` element (patch_config
     with dummy_load_detuning_hz) plays the drive's sequence far off resonance, so the isolated RB
     carries the drive line's power without its leak. Simultaneous / compensated are unchanged.
+    spectator_pi: in the probe's isolated pass the drive qubit gets one x180 first and then idles in
+    |1>, so the isolated RB carries the static probe-drive ZZ (no drive, no leak); vs the plain run,
+    delta r = 7.6e-3 (zeta/MHz)^2 per Clifford (2026-10-14, ZZ as the floor's source).
     """
     if cancel_tone not in CANCEL_TONES:
         raise ValueError(f"unknown cancel_tone {cancel_tone!r}")
@@ -413,6 +417,10 @@ def build_program(
                             elements = _played_elements(play_cond, **elem_kw)
                             if dummy_elem is not None and play_cond == "isolated":
                                 elements.append((dummy_elem, "d", None))
+                            if spectator_pi and play_cond == "isolated":
+                                # the drive qubit sits in |1> for the probe's isolated RB: static ZZ only
+                                play("x180", drive_qubit.xy.name)
+                                align(*xy_elems)
                             if debug_timestamps:
                                 for element, _, _ in elements:
                                     play("x180" * amp(0.0), element, timestamp_stream=f"ts0_{play_cond}_{element}")
@@ -714,6 +722,7 @@ class QMCrosstalkCompensatedSQRB(CrosstalkCompensatedSQRB):
             simulate=getattr(self.backend, "simulate", False),
             leak_phase_twirl=bool(getattr(self.params, "leak_phase_twirl", False)),
             dummy_load=bool(getattr(self.params, "dummy_load_detuning_hz", 0.0)),
+            spectator_pi=bool(getattr(self.params, "spectator_pi", False)),
         )
 
     def probe(self) -> Any:
