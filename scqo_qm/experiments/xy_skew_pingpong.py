@@ -70,6 +70,11 @@ def scan_op(i_tau: int, kflip: int, sign: int) -> str:
     return f"skew_t{i_tau}_k{_kname(kflip)}_s{'p' if sign > 0 else 'm'}"
 
 
+def l1_op(kflip: int, sign: int) -> str:
+    """L1's scan pulse: it does not depend on tau_sw (only L2 is shifted), so one op per (kflip, sign)."""
+    return f"skewl1_k{_kname(kflip)}_s{'p' if sign > 0 else 'm'}"
+
+
 def flip_op(sign: int) -> str:
     """L1's Y part alone (the l1_flip condition), + or - waveform."""
     return f"skewflip_s{'p' if sign > 0 else 'm'}"
@@ -104,15 +109,19 @@ def patch_config(
             f"L2 would need amplitude {peak_via:.2f} (k {k} / c_amp {c_amp} x envelope peak "
             f"{np.max(np.abs(ox)):.3f}); keep it below {MAX_VIA_AMPLITUDE}: lower k"
         )
+    for kflip in (1, -1, 0):
+        for sign in (1, -1):
+            l1, _ = scan_waveforms(
+                x180, y180, k=k, c_amp=c_amp, via_phase=via_phase, tau_ns=0.0, pad=pad_ns, kflip=kflip, sign=sign
+            )
+            _add_op(config, sensor_xy, l1_op(kflip, sign), l1)
     for i, tau in enumerate(tau_sw_ns):
-        for kflip in (1, -1, 0):
+        for kflip in (1, -1):
             for sign in (1, -1):
-                l1, l2 = scan_waveforms(
+                _, l2 = scan_waveforms(
                     x180, y180, k=k, c_amp=c_amp, via_phase=via_phase, tau_ns=tau, pad=pad_ns, kflip=kflip, sign=sign
                 )
-                _add_op(config, sensor_xy, scan_op(i, kflip, sign), l1)
-                if kflip != 0:
-                    _add_op(config, via, scan_op(i, kflip, sign), l2)
+                _add_op(config, via, scan_op(i, kflip, sign), l2)
     _add_op(config, via, "skewcal_0", cal_via_scale * ox.astype(complex))
     _add_op(config, via, "skewcal_90", cal_via_scale * 1j * ox.astype(complex))
     n1, n2 = null_waveforms(x180, y180, k=cal_null_k, c_amp=c_amp, via_phase=via_phase)
@@ -143,12 +152,26 @@ def build_scan_program(
     machine, sensor_qubit, source_qubit, *, tau_indices: list[int], tau_values: list[float], repetitions: list[int],
     kflips: list[int], pulse_cycles: int, num_shots: int, reset_type: str = "thermal", reset_max_attempts: int = 1,
     use_state_discrimination: bool = False, simulate: bool = False, debug_timestamps: bool = False,
+    layout: str = "loops",
 ):
     """y90 - [C(+), C(-)] x N - read, for every (tau_sw, N, kflip), interleaved inside one shot loop.
 
-    The two lines play inside strict_timing_ from one align, each pulse back to back on both elements
-    (L2 waits where it is silent). debug_timestamps stamps every play (TS_STREAMS).
+    layout 'loops' (default): tau_sw and kflip unrolled, N a QUA for_each_, and the N pairs one QUA for_
+    loop PER ELEMENT on its own loop variable after a common align - the SQRB's gap-free pattern
+    (hardware 2026-10-01). The program is ~2N x smaller and N costs no compile time. No strict_timing_
+    around the loops: check the lockstep with debug_timestamps.
+    layout 'unrolled': every pulse unrolled inside strict_timing_ (the first hardware version, for A/B).
+    debug_timestamps stamps every play (TS_STREAMS).
     """
+    if layout == "loops":
+        return _build_scan_program_loops(
+            machine, sensor_qubit, source_qubit, tau_indices=tau_indices, tau_values=tau_values,
+            repetitions=repetitions, kflips=kflips, num_shots=num_shots, reset_type=reset_type,
+            reset_max_attempts=reset_max_attempts, use_state_discrimination=use_state_discrimination,
+            simulate=simulate, debug_timestamps=debug_timestamps,
+        )
+    if layout != "unrolled":
+        raise ValueError(f"unknown program layout {layout!r}")
     sensor_xy = sensor_qubit.xy.name
     via = via_element_name(source_qubit)
     elems = [sensor_xy, via]
@@ -189,11 +212,76 @@ def build_scan_program(
                             wait(y90_cycles, via)
                             for _ in range(int(reps)):
                                 for sign in (1, -1):
-                                    play(scan_op(i_tau, kflip, sign), sensor_xy, **ts("ts_l1"))
+                                    play(l1_op(kflip, sign), sensor_xy, **ts("ts_l1"))
                                     if kflip != 0:
                                         play(scan_op(i_tau, kflip, sign), via, **ts("ts_l2"))
                                     else:
                                         wait(pulse_cycles, via)
+                        align()
+                        _readout(sensor_qubit, use_state_discrimination, state, state_st, I[0], I_st[0], Q[0], Q_st[0])
+                        align()
+            save(n, n_st)
+
+        with stream_processing():
+            n_st.save("n")
+            if use_state_discrimination:
+                state_st.buffer(*shape).average().save("state1")
+            else:
+                I_st[0].buffer(*shape).average().save("I1")
+                Q_st[0].buffer(*shape).average().save("Q1")
+    return prog, sweep_axes
+
+
+def _build_scan_program_loops(
+    machine, sensor_qubit, source_qubit, *, tau_indices, tau_values, repetitions, kflips, num_shots, reset_type,
+    reset_max_attempts, use_state_discrimination, simulate, debug_timestamps,
+):
+    sensor_xy = sensor_qubit.xy.name
+    via = via_element_name(source_qubit)
+    elems = [sensor_xy, via]
+    try:
+        y90_cycles = max(sensor_qubit.xy.operations["y90"].length // 4, 1)
+    except Exception:
+        y90_cycles = 4
+    ts = (lambda name: {"timestamp_stream": name}) if debug_timestamps else (lambda name: {})
+
+    # saved in (tau, kflip, N) order: the axes follow it, and the backend maps them by NAME
+    sweep_axes = {
+        "qubit": xr.DataArray([sensor_qubit.name]),
+        "tau_sw_ns": xr.DataArray(np.asarray(tau_values, dtype=float)),
+        "kflip": xr.DataArray(np.asarray(kflips, dtype=int)),
+        "repetitions": xr.DataArray(np.asarray(repetitions, dtype=int)),
+    }
+    shape = (len(tau_indices), len(kflips), len(repetitions))
+
+    with program() as prog:
+        I, I_st, Q, Q_st, n, n_st = machine.declare_qua_variables()
+        state = declare(int)
+        state_st = declare_stream()
+        n_pairs = declare(int)
+        j1, j2 = declare(int), declare(int)
+        machine.initialize_qpu(target=sensor_qubit)
+        machine.initialize_qpu(target=source_qubit)
+        align()
+
+        with for_(n, 0, n < num_shots, n + 1):
+            for i_tau in tau_indices:
+                for kflip in kflips:
+                    with for_each_(n_pairs, [int(r) for r in repetitions]):
+                        sensor_qubit.reset(reset_type, simulate, max_attempts=reset_max_attempts)
+                        source_qubit.reset(reset_type, simulate, max_attempts=reset_max_attempts)
+                        phase_reset(elems)
+                        align(*elems)
+                        play("y90", sensor_xy, **ts("ts_y90"))
+                        wait(y90_cycles, via)
+                        # one loop per element, each on its own variable: the loops run side by side
+                        with for_(j1, 0, j1 < n_pairs, j1 + 1):
+                            play(l1_op(kflip, 1), sensor_xy, **ts("ts_l1"))
+                            play(l1_op(kflip, -1), sensor_xy, **ts("ts_l1"))
+                        if kflip != 0:
+                            with for_(j2, 0, j2 < n_pairs, j2 + 1):
+                                play(scan_op(i_tau, kflip, 1), via, **ts("ts_l2"))
+                                play(scan_op(i_tau, kflip, -1), via, **ts("ts_l2"))
                         align()
                         _readout(sensor_qubit, use_state_discrimination, state, state_st, I[0], I_st[0], Q[0], Q_st[0])
                         align()
@@ -318,7 +406,7 @@ def acquire_with_timestamps(qm, prog, sweep_axes, *, use_state_discrimination: b
     job = qm.execute(prog)
     handles = job.result_handles
     handles.wait_for_all_values()
-    dims = ("qubit", "tau_sw_ns", "repetitions", "kflip")
+    dims = tuple(sweep_axes)
     shape = tuple(len(sweep_axes[d]) for d in dims)
     coords = {d: sweep_axes[d].values for d in dims}
     names = ("state1",) if use_state_discrimination else ("I1", "Q1")
@@ -390,7 +478,8 @@ class QMXySkewPingpong(_CoreXySkewPingpong):
             build_scan_program(
                 self.backend.machine, sensor_qubit, source_qubit, tau_indices=b,
                 tau_values=[p.tau_sw_ns[i] for i in b], repetitions=list(p.repetitions), kflips=p.kflips(),
-                pulse_cycles=cycles, num_shots=num_shots, debug_timestamps=p.debug_timestamps, **kw,
+                pulse_cycles=cycles, num_shots=num_shots, debug_timestamps=p.debug_timestamps,
+                layout=p.program_layout, **kw,
             )
             for b in batches
         ]
