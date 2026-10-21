@@ -175,3 +175,108 @@ def test_the_qm_shell_is_the_registered_experiment():
     p = XySkewPingpongParameters(targets=["q1", "q3"], debug_timestamps=True, tau_sw_ns=[0.5, 0.0])
     exp = QMXySkewPingpong(SimpleNamespace(device=None), p)
     assert list(exp.define_sweep()["tau_sw_ns"]) == [0.5]
+
+
+def _ef_setup():
+    mach, q1, q3 = _mock_machine()
+    q1.anharmonicity = 205.2e6
+    q1.xy.operations["EF_x90"] = SimpleNamespace(length=16)
+    cfg = _config()
+    x180 = _iq(cfg, "q1.xy", "x180")
+    for op, z in (("EF_x180", 0.8 * x180), ("EF_x90", 0.4 * x180)):
+        n = f"q1.xy.{op}"
+        cfg["waveforms"][f"{n}.I"] = {"type": "arbitrary", "samples": list(np.real(z))}
+        cfg["waveforms"][f"{n}.Q"] = {"type": "arbitrary", "samples": list(np.imag(z))}
+        cfg["pulses"][f"{n}.p"] = {"operation": "control", "length": len(z), "waveforms": {"I": f"{n}.I", "Q": f"{n}.Q"}}
+        cfg["elements"]["q1.xy"]["operations"][op] = f"{n}.p"
+    return mach, q1, q3, cfg
+
+
+def test_ef_sensor_builds_an_f12_element_and_moves_the_via_to_f12():
+    from scqo_qm.experiments.xy_skew_pingpong import sensor_drive
+
+    mach, q1, q3, cfg = _ef_setup()
+    cfg = patch_config(cfg, q1, q3, k=0.05, c_amp=0.09, via_phase=0.0, tau_sw_ns=[0.0], pad_ns=4, cal_via_scale=0.5,
+                       transition="ef")
+    ef, via = cfg["elements"]["q1.xy_ef"], cfg["elements"]["q3.xy_via"]
+    assert ef["MWInput"]["port"] == ("con1", 6, 2)
+    assert ef["intermediate_frequency"] == pytest.approx(244.6e6 - 205.2e6)
+    assert via["intermediate_frequency"] == pytest.approx(192.0e6 + (5.1446e9 - 5.1920e9) - 205.2e6)
+    assert len({ef["core"], via["core"], "a", "c"}) == 4
+    # L1's ops are the EF pulses, played on the f12 element
+    assert np.allclose(_iq(cfg, "q1.xy_ef", "skewown_x"), _iq(cfg, "q1.xy", "EF_x180"))
+    assert {"skewy90", "skewpre_x90", "skewpre_my90", l1_op(1, 1)} <= set(ef["operations"])
+    assert not any(op.startswith("skewl1_") for op in cfg["elements"]["q1.xy"]["operations"])
+    d = sensor_drive(q1, transition="ef")
+    assert d["play"] == "q1.xy_ef" and d["extra"] == ["q1.xy_ef"] and d["ef"]
+
+
+def test_ef_programs_prepare_and_map_with_ge_pi_pulses():
+    from qm import generate_qua_script
+    from scqo_qm.experiments.xy_skew_pingpong import sensor_drive
+
+    mach, q1, q3, _ = _ef_setup()
+    drive = sensor_drive(q1, transition="ef")
+    for layout in ("loops", "unrolled"):
+        prog, _ = build_scan_program(mach, q1, q3, tau_indices=[0], tau_values=[0.0], repetitions=[2], kflips=[1, -1],
+                                     pulse_cycles=6, num_shots=1, use_state_discrimination=True, layout=layout,
+                                     drive=drive)
+        sc = generate_qua_script(prog).replace("'", '"')
+        # per shot: ge pi to |1>, EF y90 + train on the f12 element, ge pi to map, readout
+        assert sc.count('play("x180", "q1.xy")') == 2 * 2
+        assert sc.count('play("skewy90", "q1.xy_ef")') == 2
+        assert re.search(r'reset_global_phase\(\)\s+align\("q1\.xy", "q1\.xy_ef", "q3\.xy_via"\)', sc)
+        assert 'play("skewl1_kp_sp", "q1.xy_ef")' in sc
+    prog, _ = build_calibrate_program(mach, q1, q3, repetitions=[2], cal_own_scale=0.05, num_shots=1,
+                                      use_state_discrimination=True, drive=drive)
+    sc = generate_qua_script(prog).replace("'", '"')
+    assert 'play("skewown_x", "q1.xy_ef", amplitude_scale=0.05)' in sc
+    assert 'play("skewpre_my90", "q1.xy_ef", amplitude_scale=' in sc
+    assert 'play("skewpre_x90", "q1.xy_ef", amplitude_scale=' in sc
+    assert sc.count('play("x180", "q1.xy")') == 2 * 4
+
+
+def test_envelope_length_stretches_both_lines_with_the_same_area():
+    from scqo_qm.experiments.xy_skew_pingpong import stretch_drag_cosine
+
+    mach, q1, q3 = _mock_machine()
+    cfg0 = _config()
+    x16 = _iq(cfg0, "q1.xy", "x180")
+    x48 = stretch_drag_cosine(x16, 48)
+    assert len(x48) == 48 and np.real(x48).sum() == pytest.approx(np.real(x16).sum())
+    cfg = patch_config(_config(), q1, q3, k=0.05, c_amp=0.09, via_phase=0.0, tau_sw_ns=[0.0], pad_ns=4,
+                       cal_via_scale=0.5, envelope_length_ns=48)
+    assert len(_iq(cfg, "q1.xy", "skewown_x")) == 48
+    assert len(_iq(cfg, "q1.xy", l1_op(1, 1))) == 56 and len(_iq(cfg, "q3.xy_via", scan_op(0, 1, 1))) == 56
+    with pytest.raises(ValueError, match="multiple of 4"):
+        stretch_drag_cosine(x16, 30)
+
+
+def test_ef_cal_program_and_ops():
+    from qm import generate_qua_script
+    from scqo_qm.experiments.xy_skew_pingpong import build_ef_cal_program
+
+    mach, q1, q3, cfg = _ef_setup()
+    cfg = patch_config(cfg, q1, q3, k=0.05, c_amp=0.09, via_phase=0.0, tau_sw_ns=[0.0], pad_ns=4, cal_via_scale=0.5,
+                       transition="ef", ef_spec_length_ns=400)
+    ops = cfg["elements"]["q1.xy_ef"]["operations"]
+    assert {"skewefpi", "skewefrabi", "skewefspec"} <= set(ops)
+    spec = _iq(cfg, "q1.xy_ef", "skewefspec")
+    assert len(spec) == 400 and np.real(spec).sum() == pytest.approx(np.real(_iq(cfg, "q1.xy", "EF_x180")).sum() / 3)
+    assert not np.imag(_iq(cfg, "q1.xy_ef", "skewefrabi")).any()
+    from qm.qua import wait
+
+    # thermal waits of different lengths (sensor shorter than source, the failing case of 2026-10-20)
+    q1.reset = lambda *a, **k: wait(100, "q1.xy")
+    q3.reset = lambda *a, **k: wait(200, "q3.xy")
+    prog = build_ef_cal_program(mach, q1, q3, ef_if_hz=39.4e6, detunings_hz=[-1000, 0, 1000], scales=[0.0, 0.5],
+                                num_shots=2)
+    sc = generate_qua_script(prog).replace("'", '"')
+    assert "update_frequency(" in sc and "for_each_(" in sc
+    assert 'play("skewefspec", "q1.xy_ef")' in sc and 'play("skewefpi", "q1.xy_ef")' in sc
+    # ge x180 in the program text: spectroscopy prep + map (2), Rabi prep + map (2), readout check
+    # |0> map (1), |1> prep + map (2), |2> prep + map (2)
+    assert sc.count('play("x180", "q1.xy")') == 9
+    assert '.save("spec")' in sc and '.save("rabi")' in sc and '.save("ro")' in sc
+    # every shot syncs ALL elements after the two thermal waits (sensor and source waits differ)
+    assert len(re.findall(r'wait\(200, "q3\.xy"\)\s+align\(\)\s', sc)) == 5
